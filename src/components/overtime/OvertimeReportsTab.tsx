@@ -250,7 +250,7 @@ export const OvertimeReportsTab: React.FC = () => {
   // List of 7 reports requested
   const reportsList = [
     { id: 1, name: 'Employee-wise Monthly Overtime Report', icon: Users, desc: 'Aggregated monthly overtime hours, wage rates, and earnings per worker' },
-    { id: 2, name: 'Daily Factory Overtime Bill Report', icon: Building2, desc: 'Daily Overtime Bill Factory sheet with 31-day breakdown, rates & signatures' },
+    { id: 2, name: 'Daily Factory Overtime Bill Report', icon: Building2, desc: 'Daily Overtime Bill of Factory sheet with 31-day breakdown, rates & signatures' },
     { id: 3, name: 'Production Batch-wise Overtime Cost Report', icon: Layers, desc: 'Direct OT cost absorbed per manufactured battery batch' },
     { id: 4, name: 'Production Order-wise Overtime Cost Report', icon: FileText, desc: 'Overtime expense absorbed per Production Work Order' },
     { id: 5, name: 'Monthly Overtime Payroll Reconciliation Report', icon: Coins, desc: 'Payable overtime amounts audited against salary sheets' },
@@ -874,7 +874,7 @@ export const OvertimeReportsTab: React.FC = () => {
     if (activeReport === 2) {
       const sheetRows: any[][] = [];
       sheetRows.push([companyDisplayName]);
-      sheetRows.push(['Daily Overtime Bill Factory']);
+      sheetRows.push(['Daily Overtime Bill of Factory']);
       sheetRows.push([`For the month of ${monthHeadingLabel}`]);
       sheetRows.push([
         '', '', '', '', '', '', '', '', '',
@@ -1379,7 +1379,7 @@ export const OvertimeReportsTab: React.FC = () => {
               {companyDisplayName}
             </div>
             <div className="text-[12px] font-bold">
-              Daily Overtime Bill Factory
+              Daily Overtime Bill of Factory
             </div>
           </div>
 
@@ -1426,7 +1426,7 @@ export const OvertimeReportsTab: React.FC = () => {
                   <th className="border border-black px-1.5 py-1 whitespace-nowrap">S/N</th>
                   <th className="border border-black px-1.5 py-1 whitespace-nowrap">EMP ID</th>
                   <th className="border border-black px-2 py-1 whitespace-nowrap">Name Of Worker</th>
-                  <th className="border border-black px-2 py-1 whitespace-nowrap">Employment Type</th>
+                  <th className="border border-black px-2 py-1 whitespace-nowrap">Department</th>
                   <th className="border border-black px-1.5 py-1 whitespace-nowrap">Gender</th>
                   <th className="border border-black px-1.5 py-1 whitespace-nowrap">Monthly Salary</th>
                   <th className="border border-black px-1.5 py-1 whitespace-nowrap">Work Day</th>
