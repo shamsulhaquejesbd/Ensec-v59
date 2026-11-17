@@ -91,6 +91,7 @@ export const MaterialIssueModal: React.FC<MaterialIssueModalProps> = ({
     const orderKey = order.id || order.orderNumber;
     if (!orderKey) return;
     fetch(`/api/manufacturing/material-issue-context/${encodeURIComponent(orderKey)}`, {
+      credentials: 'include',
       headers: {
         ...getManufacturingAuthHeaders(currentUser),
       },

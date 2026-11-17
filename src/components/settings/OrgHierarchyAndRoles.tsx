@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 import { useERP } from '../../context/ERPContext.tsx';
 import { OrgNode } from '../../types/erp.ts';
-import { getSupabase } from '../../lib/supabase.ts';
+import { backendDb } from '../../lib/apiClient.ts';
 import { addStoredMarketHierarchy } from '../../data/marketHierarchy.ts';
 
 export interface OrgHierarchyAndRolesProps {
@@ -303,27 +303,25 @@ export const OrgHierarchyAndRoles: React.FC<OrgHierarchyAndRolesProps> = ({ onNa
       });
     }
 
-    // Sync to Supabase
-    const sb = getSupabase();
-    if (sb) {
-      sb.from('org_hierarchy')
-        .upsert({
-          node_id: newNode.id,
-          code: newNode.code,
-          name: newNode.name,
-          type: newNode.type,
-          parent_id: newNode.parentId || null,
-          head_person: newNode.headPerson || null,
-          phone: newNode.phone || null,
-          notes: newNode.notes || null,
-          tagged_distributor_ids: newNode.taggedDistributorIds || [],
-          tagged_customer_ids: newNode.taggedCustomerIds || [],
-          tagged_field_force_ids: newNode.taggedFieldForceIds || [],
-        })
-        .then(({ error }) => {
-          if (error) console.warn('Supabase org_hierarchy insert error:', error.message);
-        });
-    }
+    // Sync via authenticated backend gateway
+    backendDb
+      .from('org_hierarchy')
+      .upsert({
+        node_id: newNode.id,
+        code: newNode.code,
+        name: newNode.name,
+        type: newNode.type,
+        parent_id: newNode.parentId || null,
+        head_person: newNode.headPerson || null,
+        phone: newNode.phone || null,
+        notes: newNode.notes || null,
+        tagged_distributor_ids: newNode.taggedDistributorIds || [],
+        tagged_customer_ids: newNode.taggedCustomerIds || [],
+        tagged_field_force_ids: newNode.taggedFieldForceIds || [],
+      })
+      .then(({ error }) => {
+        if (error) console.warn('Backend org_hierarchy insert error:', error.message);
+      });
 
     addAuditLog(
       'ORG_NODE_CREATED',
@@ -455,27 +453,25 @@ export const OrgHierarchyAndRoles: React.FC<OrgHierarchyAndRolesProps> = ({ onNa
         }
       }
 
-      // Sync to Supabase org_hierarchy
-      const sb = getSupabase();
-      if (sb) {
-        sb.from('org_hierarchy')
-          .upsert({
-            node_id: newNode.id,
-            code: newNode.code,
-            name: newNode.name,
-            type: newNode.type,
-            parent_id: newNode.parentId || null,
-            head_person: newNode.headPerson || null,
-            phone: newNode.phone || null,
-            notes: newNode.notes || null,
-            tagged_distributor_ids: taggedDistIds,
-            tagged_customer_ids: [],
-            tagged_field_force_ids: [],
-          })
-          .then(({ error }) => {
-            if (error) console.warn('Supabase org_hierarchy insert error:', error.message);
-          });
-      }
+      // Sync via authenticated backend gateway
+      backendDb
+        .from('org_hierarchy')
+        .upsert({
+          node_id: newNode.id,
+          code: newNode.code,
+          name: newNode.name,
+          type: newNode.type,
+          parent_id: newNode.parentId || null,
+          head_person: newNode.headPerson || null,
+          phone: newNode.phone || null,
+          notes: newNode.notes || null,
+          tagged_distributor_ids: taggedDistIds,
+          tagged_customer_ids: [],
+          tagged_field_force_ids: [],
+        })
+        .then(({ error }) => {
+          if (error) console.warn('Backend org_hierarchy insert error:', error.message);
+        });
 
       addAuditLog(
         'DISTRIBUTOR_MARKET_HIERARCHY_CREATED',
@@ -510,24 +506,22 @@ export const OrgHierarchyAndRoles: React.FC<OrgHierarchyAndRolesProps> = ({ onNa
       }))
     );
 
-    // Sync to Supabase
-    const sb = getSupabase();
-    if (sb) {
-      sb.from('org_hierarchy')
-        .update({
-          code: nodeToEdit.code.toUpperCase(),
-          name: nodeToEdit.name,
-          type: nodeToEdit.type,
-          head_person: nodeToEdit.headPerson || null,
-          phone: nodeToEdit.phone || null,
-          notes: nodeToEdit.notes || null,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('node_id', nodeToEdit.id)
-        .then(({ error }) => {
-          if (error) console.warn('Supabase org_hierarchy update error:', error.message);
-        });
-    }
+    // Sync via authenticated backend gateway
+    backendDb
+      .from('org_hierarchy')
+      .update({
+        code: nodeToEdit.code.toUpperCase(),
+        name: nodeToEdit.name,
+        type: nodeToEdit.type,
+        head_person: nodeToEdit.headPerson || null,
+        phone: nodeToEdit.phone || null,
+        notes: nodeToEdit.notes || null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('node_id', nodeToEdit.id)
+      .then(({ error }) => {
+        if (error) console.warn('Backend org_hierarchy update error:', error.message);
+      });
 
     addAuditLog(
       'ORG_NODE_UPDATED',
@@ -552,21 +546,19 @@ export const OrgHierarchyAndRoles: React.FC<OrgHierarchyAndRolesProps> = ({ onNa
       }))
     );
 
-    // Sync to Supabase
-    const sb = getSupabase();
-    if (sb) {
-      sb.from('org_hierarchy')
-        .update({
-          tagged_distributor_ids: selectedDistIds,
-          tagged_customer_ids: selectedCustIds,
-          tagged_field_force_ids: selectedFfIds,
-          updated_at: new Date().toISOString(),
-        })
-        .eq('node_id', nodeToTag.id)
-        .then(({ error }) => {
-          if (error) console.warn('Supabase org_hierarchy tag update error:', error.message);
-        });
-    }
+    // Sync via authenticated backend gateway
+    backendDb
+      .from('org_hierarchy')
+      .update({
+        tagged_distributor_ids: selectedDistIds,
+        tagged_customer_ids: selectedCustIds,
+        tagged_field_force_ids: selectedFfIds,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('node_id', nodeToTag.id)
+      .then(({ error }) => {
+        if (error) console.warn('Backend org_hierarchy tag update error:', error.message);
+      });
 
     // Update tagged distributors so their marketHierarchy reflects this node!
     const hierarchyString = `${nodeToTag.code} - ${nodeToTag.name}`;
@@ -667,19 +659,17 @@ export const OrgHierarchyAndRoles: React.FC<OrgHierarchyAndRolesProps> = ({ onNa
         }))
       );
 
-      // Sync to Supabase if configured
-      const sb = getSupabase();
-      if (sb) {
-        sb.from('org_hierarchy')
-          .update({
-            tagged_distributor_ids: updatedTagged,
-            updated_at: new Date().toISOString(),
-          })
-          .eq('node_id', targetOrgNodeForDist.id)
-          .then(({ error }) => {
-            if (error) console.warn('Supabase org_hierarchy tag update error:', error.message);
-          });
-      }
+      // Sync via authenticated backend gateway
+      backendDb
+        .from('org_hierarchy')
+        .update({
+          tagged_distributor_ids: updatedTagged,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('node_id', targetOrgNodeForDist.id)
+        .then(({ error }) => {
+          if (error) console.warn('Backend org_hierarchy tag update error:', error.message);
+        });
 
       addAuditLog(
         'DISTRIBUTOR_ONBOARDED_FROM_ORG_HIERARCHY',
@@ -718,16 +708,14 @@ export const OrgHierarchyAndRoles: React.FC<OrgHierarchyAndRolesProps> = ({ onNa
     setOrgHierarchy((prev) => deleteNodeFromTree(prev, node.id));
     setSelectedNodeId(orgHierarchy.id);
 
-    // Sync to Supabase
-    const sb = getSupabase();
-    if (sb) {
-      sb.from('org_hierarchy')
-        .delete()
-        .eq('node_id', node.id)
-        .then(({ error }) => {
-          if (error) console.warn('Supabase org_hierarchy delete error:', error.message);
-        });
-    }
+    // Sync via authenticated backend gateway
+    backendDb
+      .from('org_hierarchy')
+      .delete()
+      .eq('node_id', node.id)
+      .then(({ error }) => {
+        if (error) console.warn('Backend org_hierarchy delete error:', error.message);
+      });
 
     addAuditLog(
       'ORG_NODE_DELETED',

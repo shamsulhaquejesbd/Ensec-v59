@@ -179,7 +179,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       if (res?.success) {
         setMyPasswordFeedback({
           type: 'success',
-          message: res.warning || 'Your password was updated and synced to Supabase users table successfully!',
+          message: res.warning || 'Your password was updated and secured on the centralized server!',
         });
         setTimeout(() => {
           setShowChangePasswordModal(false);

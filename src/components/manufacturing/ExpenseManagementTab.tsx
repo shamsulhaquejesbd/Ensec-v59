@@ -386,7 +386,7 @@ CREATE POLICY "Allow public access" ON public.production_cost_allocations FOR AL
             </div>
           </div>
           <p className="text-[11px] text-slate-300">
-            If Supabase blocks anonymous writes to <code className="text-emerald-400 font-mono">expense_entries</code> or <code className="text-emerald-400 font-mono">production_cost_allocations</code>, run this SQL script in your <a href="https://supabase.com/dashboard/project/ykljdwdkgysnekiqqaby/sql" target="_blank" rel="noreferrer" className="underline text-blue-400 hover:text-blue-300 font-medium">Supabase SQL Editor</a>:
+            If database permissions block writes to <code className="text-emerald-400 font-mono">expense_entries</code> or <code className="text-emerald-400 font-mono">production_cost_allocations</code>, run this SQL script in your <a href="https://supabase.com/dashboard" target="_blank" rel="noreferrer" className="underline text-blue-400 hover:text-blue-300 font-medium">Database SQL Editor</a>:
           </p>
           <pre className="p-3 bg-slate-950 rounded-xl text-[11px] font-mono text-emerald-300 overflow-x-auto border border-slate-800 select-all">
 {`ALTER TABLE public.expense_entries ENABLE ROW LEVEL SECURITY;

@@ -51,7 +51,7 @@ import {
 } from '../../types/installment.ts';
 import { SalesOrder } from '../../types/erp.ts';
 import { calculateEarlySettlement } from '../../lib/installmentAutomation.ts';
-import { getSupabase } from '../../lib/supabase.ts';
+import { backendDb } from '../../lib/apiClient.ts';
 
 interface InstallmentManagementModuleProps {
   initialSubTab?: string;
@@ -103,27 +103,26 @@ export const InstallmentManagementModule: React.FC<InstallmentManagementModulePr
   );
 
   useEffect(() => {
+    if (!currentUser?.id) return;
     refreshInstallmentData?.();
     refreshSalesOrders?.();
 
-    const sb = getSupabase();
-    if (sb) {
-      sb.from('sales_orders')
-        .select('id, order_number, invoice_number, invoice_no')
-        .then(({ data, error }) => {
-          if (!error && Array.isArray(data)) {
-            setDbSalesOrderRefs(
-              data.map((row: any) => ({
-                id: String(row.id),
-                orderNumber: row.order_number ? String(row.order_number) : '',
-                invoiceNumber: row.invoice_number ? String(row.invoice_number) : undefined,
-                invoiceNo: row.invoice_no ? String(row.invoice_no) : undefined,
-              }))
-            );
-          }
-        });
-    }
-  }, []);
+    backendDb
+      .from('sales_orders')
+      .select('id, order_number, invoice_number, invoice_no')
+      .then(({ data, error }) => {
+        if (!error && Array.isArray(data)) {
+          setDbSalesOrderRefs(
+            data.map((row: any) => ({
+              id: String(row.id),
+              orderNumber: row.order_number ? String(row.order_number) : '',
+              invoiceNumber: row.invoice_number ? String(row.invoice_number) : undefined,
+              invoiceNo: row.invoice_no ? String(row.invoice_no) : undefined,
+            }))
+          );
+        }
+      });
+  }, [currentUser?.id]);
 
   // Clear Local Data Confirmation State
   const [showClearConfirm, setShowClearConfirm] = useState(false);

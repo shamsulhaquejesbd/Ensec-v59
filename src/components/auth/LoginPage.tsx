@@ -12,15 +12,15 @@ import {
   Building,
 } from 'lucide-react';
 import { useERP } from '../../context/ERPContext.tsx';
-import { User, Role, getDefaultPermissionsForRole, resolveUserPermissions } from '../../types/erp.ts';
-import { supabase, isSupabaseConfigured } from '../../lib/supabase.ts';
+import { User, Role, getDefaultPermissionsForRole } from '../../types/erp.ts';
+import { apiAuth } from '../../lib/apiClient.ts';
 
 export interface LoginPageProps {
   onLoginSuccess?: (user?: User) => void;
 }
 
 export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
-  const { users, login, addUser, updateUserPassword } = useERP();
+  const { users, login, addUser } = useERP();
 
   // Sign In credentials state: Clean and empty by default (no auto-fill or backdoors)
   const [identifier, setIdentifier] = useState<string>('');
@@ -33,6 +33,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
 
   // Reset / Edit Password form state
   const [resetIdentifier, setResetIdentifier] = useState<string>('');
+  const [resetCurrentPassword, setResetCurrentPassword] = useState<string>('');
   const [newPasswordVal, setNewPasswordVal] = useState<string>('');
   const [confirmPasswordVal, setConfirmPasswordVal] = useState<string>('');
   const [showResetPasswordToggle, setShowResetPasswordToggle] = useState<boolean>(false);
@@ -55,7 +56,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
-  // Handle strictly validated Sign In
+  // Handle strictly backend-validated Sign In (bcrypt + HttpOnly session cookie)
   const handleSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
@@ -63,7 +64,6 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
     setSuccessMessage(null);
 
     const cleanId = identifier.trim();
-    const cleanIdLower = cleanId.toLowerCase();
     const inputPass = password;
 
     if (!cleanId) {
@@ -79,113 +79,25 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
     }
 
     try {
-      // 1. Resolve matching account in registered ERP Users
-      let matchedUser: User | undefined = users.find(
-        (u) =>
-          (u.userId && u.userId.trim().toLowerCase() === cleanIdLower) ||
-          (u.email && u.email.trim().toLowerCase() === cleanIdLower) ||
-          (u.phone && u.phone.replace(/[^0-9]/g, '') === cleanIdLower.replace(/[^0-9]/g, '')) ||
-          (u.salesmanCode && u.salesmanCode.trim().toLowerCase() === cleanIdLower)
-      );
-
-      // 2. If not found in local memory, query Supabase public.users table
-      if (!matchedUser && isSupabaseConfigured && supabase) {
-        try {
-          const { data } = await supabase
-            .from('users')
-            .select('*')
-            .or(`user_id.ilike.${cleanId},email.ilike.${cleanId},uid.eq.${cleanId},phone.eq.${cleanId}`)
-            .limit(1)
-            .maybeSingle();
-
-          if (data) {
-            matchedUser = {
-              id: data.uid ? String(data.uid) : `u-sb-${data.id}`,
-              userId: data.user_id || data.uid || (data.email ? data.email.split('@')[0].toUpperCase() : `EMP-${data.id}`),
-              name: data.name || 'Staff User',
-              email: data.email || '',
-              password:
-                data.password !== undefined && data.password !== null && data.password !== ''
-                  ? String(data.password)
-                  : undefined,
-              phone: data.phone || '',
-              role: (data.role as any) || 'Field Force',
-              designation: data.designation || '',
-              department: data.department || '',
-              status:
-                data.status === 'Inactive'
-                  ? 'Inactive'
-                  : data.status === 'Blocked'
-                  ? 'Blocked'
-                  : 'Active',
-              permissions: resolveUserPermissions({
-                role: (data.role as any) || 'Field Force',
-                permissions:
-                  typeof data.permissions === 'string'
-                    ? (() => {
-                        try {
-                          return JSON.parse(data.permissions);
-                        } catch {
-                          return null;
-                        }
-                      })()
-                    : data.permissions,
-              }),
-              isSalesman: data.is_salesman,
-              salesmanCode: data.salesman_code,
-            };
-          }
-        } catch (dbErr) {
-          console.warn('Supabase authentication check:', dbErr);
-        }
-      }
-
-      // 3. Fallback only if user directory is completely unseeded
-      if (!matchedUser && users.length === 0 && (cleanIdLower === 'admin' || cleanIdLower === 'admin@ensecbd.com')) {
-        matchedUser = {
-          id: 'u-admin-root',
-          userId: 'ADMIN',
-          password: 'ensec2026',
-          name: 'Super Admin',
-          email: 'admin@ensecbd.com',
-          role: 'Super Admin',
-          designation: 'Managing Director / System Administrator',
-          department: 'Management',
-          status: 'Active',
-          permissions: getDefaultPermissionsForRole('Super Admin'),
-        };
-      }
-
-      // 4. If account does not exist, reject
-      if (!matchedUser) {
-        setErrorMessage('Access Denied: Invalid User ID or Email. No registered account found.');
+      const authResult = await apiAuth.login(cleanId, inputPass);
+      if (!authResult?.authenticated || !authResult?.user) {
+        setErrorMessage(authResult?.error || 'Authentication failed. Please verify credentials.');
         setIsLoading(false);
         return;
       }
 
-      // 5. Check if account is active
-      if (matchedUser.status === 'Blocked' || matchedUser.status === 'Inactive') {
-        setErrorMessage(`Access Denied: This account is currently marked as ${matchedUser.status}. Contact your Administrator.`);
-        setIsLoading(false);
-        return;
-      }
+      const verifiedUser: User = {
+        ...authResult.user,
+        password: '',
+      };
 
-      // 6. Strict Password Verification: Must match the account's registered password
-      const registeredPassword = matchedUser.password;
-      if (!registeredPassword || inputPass !== registeredPassword) {
-        setErrorMessage('Access Denied: Incorrect password. Please try again.');
-        setIsLoading(false);
-        return;
-      }
-
-      // 7. Credentials verified: Log in and notify parent router
-      setSuccessMessage(`Credentials verified. Welcome back, ${matchedUser.name}!`);
+      setSuccessMessage(`Credentials verified. Welcome back, ${verifiedUser.name}!`);
       setTimeout(() => {
-        login(matchedUser);
-        onLoginSuccess?.(matchedUser);
-      }, 250);
+        login(verifiedUser);
+        onLoginSuccess?.(verifiedUser);
+      }, 200);
     } catch (err: any) {
-      setErrorMessage(err.message || 'Authentication failed. Please verify credentials.');
+      setErrorMessage(err?.message || 'Authentication failed. Please verify credentials.');
       setIsLoading(false);
     }
   };
@@ -268,14 +180,22 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
     }
   };
 
-  // Reset / Edit Password Handler
+  // Reset / Change Password Handler (verified exclusively on backend)
   const handleResetPasswordSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setResetFeedback(null);
 
-    const cleanId = resetIdentifier.trim().toLowerCase();
+    const cleanId = resetIdentifier.trim();
     if (!cleanId) {
       setResetFeedback({ type: 'error', message: 'Please enter your registered User ID or Email.' });
+      return;
+    }
+
+    if (!resetCurrentPassword) {
+      setResetFeedback({
+        type: 'error',
+        message: 'Please enter your Current Password, or contact your System Administrator to reset it.',
+      });
       return;
     }
 
@@ -290,68 +210,34 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
 
     setIsResetting(true);
 
-    let targetUser: User | null =
-      users.find(
-        (u) =>
-          (u.userId && u.userId.trim().toLowerCase() === cleanId) ||
-          (u.email && u.email.trim().toLowerCase() === cleanId) ||
-          (u.phone && u.phone.replace(/[^0-9]/g, '') === cleanId.replace(/[^0-9]/g, '')) ||
-          (u.salesmanCode && u.salesmanCode.trim().toLowerCase() === cleanId)
-      ) || null;
+    try {
+      await apiAuth.resetPassword({
+        identifier: cleanId,
+        currentPassword: resetCurrentPassword,
+        newPassword: newPasswordVal.trim(),
+      });
 
-    // Check Supabase public.users if not cached in memory
-    if (!targetUser && isSupabaseConfigured && supabase) {
-      try {
-        const { data } = await supabase
-          .from('users')
-          .select('*')
-          .or(`user_id.ilike.${cleanId},email.ilike.${cleanId},uid.eq.${cleanId},phone.eq.${cleanId}`)
-          .limit(1)
-          .maybeSingle();
-
-        if (data) {
-          targetUser = {
-            id: data.uid ? String(data.uid) : `u-sb-${data.id}`,
-            userId: data.user_id || data.uid || (data.email ? data.email.split('@')[0].toUpperCase() : `EMP-${data.id}`),
-            name: data.name || 'Staff User',
-            email: data.email || '',
-            role: (data.role as any) || 'Field Force',
-            status: data.status || 'Active',
-            permissions: resolveUserPermissions({
-              role: (data.role as any) || 'Field Force',
-              permissions: data.permissions,
-            }),
-          };
-        }
-      } catch (err) {
-        console.warn('Supabase find user notice:', err);
-      }
-    }
-
-    if (targetUser) {
-      try {
-        await updateUserPassword(targetUser.id, newPasswordVal.trim());
-        setResetFeedback({
-          type: 'success',
-          message: `Password updated for ${targetUser.name}! Logging in now...`,
-        });
-        setPassword(newPasswordVal.trim());
-        setIdentifier(targetUser.userId || targetUser.email || resetIdentifier);
-        setTimeout(() => {
-          setShowForgotModal(false);
-          setIsResetting(false);
-          const updatedUser = { ...targetUser, password: newPasswordVal.trim() };
-          login(updatedUser);
-          onLoginSuccess?.(updatedUser);
-        }, 800);
-      } catch (err: any) {
-        setResetFeedback({ type: 'error', message: err.message || 'Failed to update password.' });
+      const authResult = await apiAuth.login(cleanId, newPasswordVal.trim());
+      setResetFeedback({
+        type: 'success',
+        message: `Password updated for ${authResult?.user?.name || cleanId}! Logging in now...`,
+      });
+      setPassword(newPasswordVal.trim());
+      setIdentifier(authResult?.user?.userId || authResult?.user?.email || cleanId);
+      setTimeout(() => {
+        setShowForgotModal(false);
         setIsResetting(false);
-      }
-    } else {
+        setResetCurrentPassword('');
+        if (authResult?.user) {
+          const safeUser = { ...authResult.user, password: '' };
+          login(safeUser);
+          onLoginSuccess?.(safeUser);
+        }
+      }, 600);
+    } catch (err: any) {
       setResetFeedback({
         type: 'error',
-        message: `Account "${resetIdentifier}" not found. Only registered personnel can reset passwords.`,
+        message: err?.message || 'Failed to update password. Please verify your current password.',
       });
       setIsResetting(false);
     }
@@ -551,6 +437,21 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess }) => {
                   value={resetIdentifier}
                   onChange={(e) => setResetIdentifier(e.target.value)}
                   placeholder="e.g. ADMIN or EMP-001"
+                  className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 placeholder-slate-400 font-mono text-xs focus:outline-none focus:bg-white focus:border-indigo-600 focus:ring-2 focus:ring-indigo-100"
+                />
+              </div>
+
+              {/* Current Password Field */}
+              <div className="space-y-1">
+                <label className="block text-[10px] font-bold tracking-wider text-slate-700 uppercase">
+                  CURRENT PASSWORD
+                </label>
+                <input
+                  type={showResetPasswordToggle ? 'text' : 'password'}
+                  required
+                  value={resetCurrentPassword}
+                  onChange={(e) => setResetCurrentPassword(e.target.value)}
+                  placeholder="Enter current password"
                   className="w-full px-3 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 placeholder-slate-400 font-mono text-xs focus:outline-none focus:bg-white focus:border-indigo-600 focus:ring-2 focus:ring-indigo-100"
                 />
               </div>

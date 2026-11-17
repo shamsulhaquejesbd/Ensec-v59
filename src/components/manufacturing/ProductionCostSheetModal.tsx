@@ -65,6 +65,7 @@ export const ProductionCostSheetModal: React.FC<ProductionCostSheetModalProps> =
 
     let cancelled = false;
     fetch(`/api/manufacturing/cost-sheet/${encodeURIComponent(order.id || order.orderNumber || order.batchNumber)}`, {
+      credentials: 'include',
       headers: {
         ...getManufacturingAuthHeaders(currentUser),
       },

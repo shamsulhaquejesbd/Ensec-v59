@@ -12,7 +12,16 @@ import { EXPECTED_ERP_TABLES } from './schemaRegistry.ts';
 export interface DbAuditEvent {
   id: string;
   timestamp: string;
-  eventType: 'DB_STATUS_CHECK' | 'DB_SCHEMA_VERIFY' | 'DB_CONFIG_LOADED';
+  eventType:
+    | 'DB_STATUS_CHECK'
+    | 'DB_SCHEMA_VERIFY'
+    | 'DB_CONFIG_LOADED'
+    | 'AUTH_LOGIN_SUCCESS'
+    | 'AUTH_LOGIN_FAILED'
+    | 'AUTH_LOGOUT'
+    | 'PASSWORD_HASH_MIGRATED'
+    | 'PASSWORD_CHANGED'
+    | 'USER_PASSWORD_UPDATED';
   actorId: string;
   actorName: string;
   actorRole: string;

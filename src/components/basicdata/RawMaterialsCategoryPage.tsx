@@ -29,7 +29,6 @@ import {
 } from 'lucide-react';
 import { useERP } from '../../context/ERPContext.tsx';
 import { RawMaterialCategory } from '../../types/erp.ts';
-import { isSupabaseConfigured } from '../../lib/supabase.ts';
 
 export interface RawMaterialsCategoryPageProps {
   onNavigate?: (module: string) => void;
@@ -38,7 +37,7 @@ export interface RawMaterialsCategoryPageProps {
 export const RawMaterialsCategoryPage: React.FC<RawMaterialsCategoryPageProps> = ({
   onNavigate,
 }) => {
-  const isConfigured = isSupabaseConfigured;
+  const isConfigured = true;
   const {
     rawMaterials,
     rawMaterialCategories,

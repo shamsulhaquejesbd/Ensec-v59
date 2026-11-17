@@ -237,11 +237,15 @@ import {
   INITIAL_MONTHLY_PAYROLL_RUNS,
 } from '../mock/payrollData.ts';
 import {
-  supabase,
-  getSupabase,
-  checkSupabaseConfigured,
-  isSupabaseConfigured,
-} from '../lib/supabase.ts';
+  apiAuth,
+  apiRequest,
+  backendDb,
+  subscribeErpEvents,
+} from '../lib/apiClient.ts';
+
+// All database operations route exclusively through the authenticated Express backend gateway.
+const getSupabase = () => backendDb;
+const checkSupabaseConfigured = () => true;
 import {
   OvertimeRequest,
   OvertimeAttendance,
@@ -944,7 +948,6 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const DEFAULT_ROOT_ADMIN: User = {
     id: 'u-admin-root',
     userId: 'ADMIN',
-    password: 'ensec2026',
     name: 'Super Admin',
     email: 'admin@ensecbd.com',
     role: 'Super Admin',
@@ -954,7 +957,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     permissions: getDefaultPermissionsForRole('Super Admin'),
   };
 
-  // User directory state (initialized from local cache if clean, populated from Supabase)
+  // User directory state (passwords are never stored in browser state or localStorage)
   const [users, setUsers] = useState<User[]>(() => {
     const SAMPLE_USER_IDS = new Set(['u-1', 'u-2', 'u-3', 'u-4', 'u-5', 'u-6', 'u-7', 'u-8', 'u-raju']);
     const SAMPLE_EMP_IDS = new Set(['EMP-001', 'EMP-002', 'EMP-003', 'EMP-004', 'EMP-005', 'EMP-006', 'EMP-007', 'EMP-008', 'EMP-010']);
@@ -975,14 +978,16 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         try {
           const parsed = JSON.parse(saved);
           if (Array.isArray(parsed)) {
-            const realUsers = parsed.filter(
-              (u) =>
-                u &&
-                u.id &&
-                !SAMPLE_USER_IDS.has(u.id) &&
-                !SAMPLE_EMP_IDS.has(u.userId) &&
-                !SAMPLE_MOCK_EMAILS.has(u.email?.toLowerCase())
-            );
+            const realUsers = parsed
+              .filter(
+                (u) =>
+                  u &&
+                  u.id &&
+                  !SAMPLE_USER_IDS.has(u.id) &&
+                  !SAMPLE_EMP_IDS.has(u.userId) &&
+                  !SAMPLE_MOCK_EMAILS.has(u.email?.toLowerCase())
+              )
+              .map(({ password: _p, ...safe }: any) => safe);
             if (realUsers.length > 0) {
               return realUsers;
             }
@@ -997,20 +1002,22 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      localStorage.setItem('ensec_erp_users', JSON.stringify(users));
+      const sanitizedUsers = users.map(({ password: _p, ...safe }) => safe);
+      localStorage.setItem('ensec_erp_users', JSON.stringify(sanitizedUsers));
     }
   }, [users]);
 
-  // Secure user session: restores legitimate active authenticated user without default admin bypass
+  // Secure user session: restores cached safe profile only while verifying HttpOnly cookie via /api/auth/me
   const [currentUser, setCurrentUser] = useState<User>(() => {
     if (typeof window !== 'undefined') {
+      localStorage.removeItem('ensec_erp_session_token');
       const isAuth = localStorage.getItem('ensec_erp_auth') === 'true';
       const sessionUserStr = localStorage.getItem('ensec_erp_session_user');
       if (isAuth && sessionUserStr) {
         try {
           const parsed = JSON.parse(sessionUserStr);
           if (parsed && parsed.id && parsed.status !== 'Blocked' && parsed.status !== 'Inactive') {
-            return parsed;
+            return { ...parsed, password: '' };
           }
         } catch {
           // invalid json
@@ -1020,7 +1027,6 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return GUEST_USER;
   });
 
-  // Strict authentication state: requires verified stored session
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
       const isAuth = localStorage.getItem('ensec_erp_auth') === 'true';
@@ -1035,7 +1041,6 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           // invalid json
         }
       }
-      // Purge any stale unverified flags
       localStorage.removeItem('ensec_erp_auth');
       localStorage.removeItem('ensec_erp_uid');
       localStorage.removeItem('ensec_erp_session_user');
@@ -1043,80 +1048,74 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return false;
   });
 
-  const [erpSessionToken, setErpSessionToken] = useState<string | null>(() => {
-    if (typeof window !== 'undefined') {
-      return localStorage.getItem('ensec_erp_session_token');
-    }
-    return null;
-  });
+  // Session cookies are HttpOnly and never exposed in client state or localStorage
+  const erpSessionToken: string | null = null;
 
   const getErpAuthHeaders = useCallback((): Record<string, string> => {
-    const token =
-      erpSessionToken ||
-      (typeof window !== 'undefined' ? localStorage.getItem('ensec_erp_session_token') : null) ||
-      '';
-    const headers: Record<string, string> = {
+    return {
       'Content-Type': 'application/json',
     };
-    if (token) {
-      headers['x-erp-session-token'] = token;
-      headers['Authorization'] = `Bearer ${token}`;
-    }
-    if (currentUser?.id && currentUser.id !== 'guest') {
-      headers['x-user-id'] = String(currentUser.id);
-      if (currentUser.userId || currentUser.salesmanCode) {
-        headers['x-user-code'] = String(currentUser.userId || currentUser.salesmanCode || '');
-      }
-      if (currentUser.email) {
-        headers['x-user-email'] = String(currentUser.email);
-      }
-    }
-    return headers;
-  }, [erpSessionToken, currentUser]);
+  }, []);
 
-  const establishServerSession = useCallback(async (userObj: User) => {
-    if (typeof window === 'undefined' || !userObj?.id || userObj.id === 'guest') return;
-    try {
-      const resp = await fetch('/api/auth/session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ user: { ...userObj, password: '' } }),
-      });
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data?.token) {
-          setErpSessionToken(data.token);
-          localStorage.setItem('ensec_erp_session_token', data.token);
-        }
-      } else if (resp.status === 401 || resp.status === 403) {
-        // Account deactivated or rejected server-side
-        setIsAuthenticated(false);
-        setCurrentUser(GUEST_USER);
-        setErpSessionToken(null);
-        localStorage.removeItem('ensec_erp_auth');
-        localStorage.removeItem('ensec_erp_uid');
-        localStorage.removeItem('ensec_erp_session_user');
-        localStorage.removeItem('ensec_erp_session_token');
-      }
-    } catch {
-      // Offline / dev restart graceful fallback
+  const clearLocalSessionState = useCallback(() => {
+    setIsAuthenticated(false);
+    setCurrentUser(GUEST_USER);
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem('ensec_erp_auth');
+      localStorage.removeItem('ensec_erp_uid');
+      localStorage.removeItem('ensec_erp_session_user');
+      localStorage.removeItem('ensec_erp_session_token');
     }
   }, []);
 
-  // Ensure server session token exists & stays valid when ERP user is authenticated
+  // Verify HttpOnly session cookie with backend on mount; purge stale client auth if invalid/expired
   useEffect(() => {
-    if (!isAuthenticated || !currentUser?.id || currentUser.id === 'guest') return;
-    establishServerSession(currentUser);
-  }, [isAuthenticated, currentUser?.id, currentUser?.userId, currentUser?.email, currentUser?.status, establishServerSession]);
+    if (typeof window === 'undefined') return;
+    let cancelled = false;
 
-  // Listen for cross-tab logout or session changes so Mobile Field Force & ERP immediately reflect logout
+    const verifyCookieSession = async () => {
+      try {
+        const res = await apiAuth.me();
+        if (cancelled) return;
+        if (res?.authenticated && res?.user) {
+          const safeUser: User = { ...res.user, password: '' };
+          setCurrentUser(safeUser);
+          setIsAuthenticated(true);
+          localStorage.setItem('ensec_erp_auth', 'true');
+          localStorage.setItem('ensec_erp_uid', safeUser.id);
+          localStorage.setItem('ensec_erp_session_user', JSON.stringify(safeUser));
+        } else {
+          clearLocalSessionState();
+        }
+      } catch (err: any) {
+        if (cancelled) return;
+        if (err?.status === 401 || err?.status === 403) {
+          clearLocalSessionState();
+        }
+      }
+    };
+
+    verifyCookieSession();
+
+    const handleAuthExpired = () => {
+      clearLocalSessionState();
+      window.dispatchEvent(new CustomEvent('ensec-logout'));
+    };
+
+    window.addEventListener('ensec-auth-expired', handleAuthExpired);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('ensec-auth-expired', handleAuthExpired);
+    };
+  }, [clearLocalSessionState]);
+
+  // Listen for cross-tab logout or session changes
   useEffect(() => {
     if (typeof window === 'undefined') return;
     const handleStorageChange = (e: StorageEvent) => {
       if (e.key === 'ensec_erp_auth' && e.newValue !== 'true') {
         setIsAuthenticated(false);
         setCurrentUser(GUEST_USER);
-        setErpSessionToken(null);
       } else if (e.key === 'ensec_erp_session_user' && e.newValue) {
         try {
           const parsed = JSON.parse(e.newValue);
@@ -1124,21 +1123,18 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             if (parsed.status === 'Blocked' || parsed.status === 'Inactive') {
               setIsAuthenticated(false);
               setCurrentUser(GUEST_USER);
-              setErpSessionToken(null);
             } else {
-              setCurrentUser(parsed);
+              setCurrentUser({ ...parsed, password: '' });
             }
           }
         } catch {}
-      } else if (e.key === 'ensec_erp_session_token') {
-        setErpSessionToken(e.newValue);
       }
     };
     window.addEventListener('storage', handleStorageChange);
     return () => window.removeEventListener('storage', handleStorageChange);
   }, []);
 
-  // Synchronize and validate active user session against database records
+  // Synchronize active user profile/status against directory
   useEffect(() => {
     if (isAuthenticated && currentUser.id && typeof window !== 'undefined') {
       if (users.length > 0) {
@@ -1151,13 +1147,11 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         if (found) {
           if (found.status === 'Blocked' || found.status === 'Inactive') {
-            // Account deactivated: revoke session immediately
             logout();
           } else {
-            // Sync any elevated permissions or profile updates safely
             const updated: User = {
               ...found,
-              password: '', // Never hold password in active session state
+              password: '',
             };
             setCurrentUser(updated);
             localStorage.setItem('ensec_erp_session_user', JSON.stringify(updated));
@@ -1168,7 +1162,6 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [users, isAuthenticated]);
 
   const login = (user: User) => {
-    // Sanitize user: never store credentials or passwords in session memory
     const safeUser: User = {
       ...user,
       password: '',
@@ -1179,36 +1172,17 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       localStorage.setItem('ensec_erp_auth', 'true');
       localStorage.setItem('ensec_erp_uid', user.id);
       localStorage.setItem('ensec_erp_session_user', JSON.stringify(safeUser));
+      localStorage.removeItem('ensec_erp_session_token');
     }
-    establishServerSession(safeUser);
   };
 
   const logout = () => {
-    const tokenToRevoke =
-      erpSessionToken ||
-      (typeof window !== 'undefined' ? localStorage.getItem('ensec_erp_session_token') : null);
-    if (tokenToRevoke && typeof fetch !== 'undefined') {
-      fetch('/api/auth/logout', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-erp-session-token': tokenToRevoke,
-        },
-        body: JSON.stringify({ token: tokenToRevoke }),
-      }).catch(() => {});
-    }
-    setErpSessionToken(null);
-    setIsAuthenticated(false);
-    setCurrentUser(GUEST_USER);
+    apiAuth.logout().catch(() => {});
+    clearLocalSessionState();
     if (typeof window !== 'undefined') {
-      localStorage.removeItem('ensec_erp_auth');
-      localStorage.removeItem('ensec_erp_uid');
-      localStorage.removeItem('ensec_erp_session_user');
-      localStorage.removeItem('ensec_erp_session_token');
       try {
         sessionStorage.clear();
       } catch {}
-      // Prevent browser back navigation into protected views
       window.history.replaceState(null, '', '/login');
       window.dispatchEvent(new CustomEvent('ensec-logout'));
     }
@@ -2434,23 +2408,27 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (typeof window !== 'undefined') {
       localStorage.setItem('ensec_office_locations', JSON.stringify(officeLocations));
     }
+    if (!isAuthenticated || !currentUser?.id) return;
     fetch('/api/office-locations/sync', {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ locations: officeLocations }),
     }).catch(() => {});
-  }, [officeLocations]);
+  }, [officeLocations, isAuthenticated, currentUser?.id]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
       localStorage.setItem('ensec_attendance_records', JSON.stringify(attendanceRecords));
     }
+    if (!isAuthenticated || !currentUser?.id) return;
     fetch('/api/attendance/sync', {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ records: attendanceRecords }),
     }).catch(() => {});
-  }, [attendanceRecords]);
+  }, [attendanceRecords, isAuthenticated, currentUser?.id]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -4784,68 +4762,25 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const refreshUsers = async () => {
-    const sb = getSupabase();
-    if (sb) {
-      try {
-        const { data, error } = await sb
-          .from('users')
-          .select('*')
-          .order('id', { ascending: true });
-
-        if (!error && Array.isArray(data)) {
-          const mappedUsers: User[] = data.map((row: any) => ({
-            id: row.uid ? String(row.uid) : `u-sb-${row.id}`,
-            userId:
-              row.user_id ||
-              row.uid ||
-              (row.email ? row.email.split('@')[0].toUpperCase() : `EMP-${row.id}`),
-            name: row.name || 'Staff User',
-            email: row.email || '',
-            password:
-              row.password !== undefined && row.password !== null && row.password !== ''
-                ? String(row.password)
-                : 'ensec2026',
-            phone: row.phone || '',
-            role: (row.role as any) || 'Field Force',
-            designation: row.designation || '',
-            department: row.department || '',
-            status:
-              row.status === 'Inactive'
-                ? 'Inactive'
-                : row.status === 'Blocked'
-                ? 'Blocked'
-                : 'Active',
-            avatar: row.avatar,
-            permissions: resolveUserPermissions({
-              role: (row.role as any) || 'Field Force',
-              permissions:
-                typeof row.permissions === 'string'
-                  ? (() => {
-                      try {
-                        return JSON.parse(row.permissions);
-                      } catch {
-                        return null;
-                      }
-                    })()
-                  : row.permissions,
-            }),
-            isSalesman:
-              row.is_salesman ??
-              (row.role === 'Field Force' ||
-                row.role === 'Sales Head' ||
-                row.role === 'Territory Sales Officer'),
-            salesmanCode: row.salesman_code || row.salesmancode,
-            monthlySalesTargetBDT: row.monthly_target_bdt || row.monthlysalestargetbdt,
-            createdAt: row.created_at,
-          }));
-
-          setUsers(mappedUsers);
-          if (typeof window !== 'undefined') {
-            localStorage.setItem('ensec_erp_users', JSON.stringify(mappedUsers));
-          }
+    if (!isAuthenticated || !currentUser?.id) return;
+    try {
+      const res = await apiRequest<{ ok: boolean; users: User[] }>('/api/erp/users', {
+        method: 'GET',
+      });
+      if (res?.ok && Array.isArray(res.users) && res.users.length > 0) {
+        const sanitizedUsers: User[] = res.users.map((u: any) => ({
+          ...u,
+          password: '',
+        }));
+        setUsers(sanitizedUsers);
+        if (typeof window !== 'undefined') {
+          localStorage.setItem('ensec_erp_users', JSON.stringify(sanitizedUsers));
         }
-      } catch (err) {
-        console.warn('Supabase refreshUsers notice:', err);
+      }
+    } catch (err: any) {
+      // 403 Forbidden is expected for non-Admin users without users-permissions view access
+      if (err?.status !== 403) {
+        console.warn('refreshUsers notice:', err?.message || err);
       }
     }
   };
@@ -6204,10 +6139,12 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   useEffect(() => {
     if (typeof window === 'undefined' || typeof fetch === 'undefined') return;
+    if (!isAuthenticated || !currentUser?.id) return;
     const controller = new AbortController();
     const timer = setTimeout(() => {
       fetch('/api/manufacturing/sync-state', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           users: users.map((u) => ({
@@ -6244,7 +6181,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       clearTimeout(timer);
       controller.abort();
     };
-  }, [users, fieldForceReps, productionOrders, materialIssues, rawMaterials, inventoryBatches, overtimeRequests, overtimeAttendances, overtimePolicies]);
+  }, [isAuthenticated, currentUser?.id, users, fieldForceReps, productionOrders, materialIssues, rawMaterials, inventoryBatches, overtimeRequests, overtimeAttendances, overtimePolicies]);
 
   useEffect(() => {
     // Purge test data Telecom Energy Storage and normalize any remnant products
@@ -6310,281 +6247,188 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       } catch {}
     }
+  }, []);
+
+  // Hydrate permitted ERP modules and subscribe to authenticated backend SSE real-time updates
+  useEffect(() => {
+    if (!isAuthenticated || !currentUser?.id) return;
+
     refreshAllBasicData();
 
-    // Setup Supabase Realtime listener for live database synchronization
-    const sb = getSupabase();
-    let rmcChannel: any = null;
-    let clsChannel: any = null;
-    let whChannel: any = null;
-    let prodChannel: any = null;
-    let catChannel: any = null;
-    let soChannel: any = null;
-    let bomChannel: any = null;
-    let poChannel: any = null;
-    let officeChannel: any = null;
-    let insPlanChannel: any = null;
-    let insSchedChannel: any = null;
-
-    if (sb && typeof sb.channel === 'function') {
-      try {
-        poChannel = sb
-          .channel('realtime:production_orders')
-          .on(
-            'postgres_changes',
-            { event: '*', schema: 'public', table: 'production_orders' },
-            () => {
-              refreshProductionOrders();
-            }
-          )
-          .subscribe();
-
-        bomChannel = sb
-          .channel('realtime:bill_of_materials')
-          .on(
-            'postgres_changes',
-            { event: '*', schema: 'public', table: 'bill_of_materials' },
-            () => {
-              refreshBOMs();
-            }
-          )
-          .subscribe();
-
-        catChannel = sb
-          .channel('realtime:product_categories')
-          .on(
-            'postgres_changes',
-            { event: '*', schema: 'public', table: 'product_categories' },
-            () => {
-              refreshProductCategories();
-            }
-          )
-          .subscribe();
-
-        prodChannel = sb
-          .channel('realtime:products')
-          .on(
-            'postgres_changes',
-            { event: '*', schema: 'public', table: 'products' },
-            () => {
-              refreshProducts();
-            }
-          )
-          .subscribe();
-        rmcChannel = sb
-          .channel('realtime:raw_material_categories')
-          .on(
-            'postgres_changes',
-            { event: '*', schema: 'public', table: 'raw_material_categories' },
-            (payload: any) => {
-              if (payload.eventType === 'INSERT' && payload.new) {
-                const row = payload.new;
-                const newCat: RawMaterialCategory = {
-                  id: String(row.id),
-                  code: row.code || '',
-                  name: row.name || '',
-                  description: row.description || '',
-                  status: row.status === 'Inactive' ? 'Inactive' : 'Active',
-                  parentClassification: row.parent_classification || row.parentClassification || '',
-                };
-                setRawMaterialCategories((prev) => {
-                  const exists = prev.some((c) => c.id === newCat.id || c.code === newCat.code);
-                  if (exists) {
-                    return prev.map((c) => (c.id === newCat.id || c.code === newCat.code ? newCat : c));
-                  }
-                  return [newCat, ...prev];
-                });
-              } else if (payload.eventType === 'UPDATE' && payload.new) {
-                const row = payload.new;
-                setRawMaterialCategories((prev) =>
-                  prev.map((c) =>
-                    c.id === String(row.id) || c.code === row.code
-                      ? {
-                          ...c,
-                          id: String(row.id),
-                          code: row.code || c.code,
-                          name: row.name || c.name,
-                          description: row.description ?? c.description,
-                          status: row.status === 'Inactive' ? 'Inactive' : 'Active',
-                          parentClassification: row.parent_classification || c.parentClassification || '',
-                        }
-                      : c
-                  )
-                );
-              } else if (payload.eventType === 'DELETE' && payload.old) {
-                const row = payload.old;
-                setRawMaterialCategories((prev) =>
-                  prev.filter((c) => c.id !== String(row.id) && c.code !== row.code)
-                );
+    const unsubscribeSse = subscribeErpEvents((evt) => {
+      switch (evt.table) {
+        case 'production_orders':
+          refreshProductionOrders();
+          break;
+        case 'bill_of_materials':
+          refreshBOMs();
+          break;
+        case 'product_categories':
+          refreshProductCategories();
+          break;
+        case 'products':
+          refreshProducts();
+          break;
+        case 'sales_orders':
+          refreshSalesOrders();
+          break;
+        case 'office_locations':
+          refreshOfficeLocations();
+          break;
+        case 'installment_plans':
+        case 'installment_schedules':
+          refreshInstallmentData();
+          break;
+        case 'raw_material_categories': {
+          if (evt.eventType === 'INSERT' && evt.newRow) {
+            const row = evt.newRow;
+            const newCat: RawMaterialCategory = {
+              id: String(row.id),
+              code: row.code || '',
+              name: row.name || '',
+              description: row.description || '',
+              status: row.status === 'Inactive' ? 'Inactive' : 'Active',
+              parentClassification: row.parent_classification || row.parentClassification || '',
+            };
+            setRawMaterialCategories((prev) => {
+              const exists = prev.some((c) => c.id === newCat.id || c.code === newCat.code);
+              if (exists) {
+                return prev.map((c) => (c.id === newCat.id || c.code === newCat.code ? newCat : c));
               }
-            }
-          )
-          .subscribe();
-
-        clsChannel = sb
-          .channel('realtime:raw_material_classifications')
-          .on(
-            'postgres_changes',
-            { event: '*', schema: 'public', table: 'raw_material_classifications' },
-            (payload: any) => {
-              if (payload.eventType === 'INSERT' && payload.new) {
-                const row = payload.new;
-                const newCls: RawMaterialClassification = {
-                  id: String(row.id),
-                  code: row.code || '',
-                  name: row.name || '',
-                  description: row.description || '',
-                  colorTag: row.color_tag || row.colorTag || 'amber',
-                  status: row.status === 'Inactive' ? 'Inactive' : 'Active',
-                };
-                setRawMaterialClassifications((prev) => {
-                  const exists = prev.some((c) => c.id === newCls.id || c.code === newCls.code);
-                  if (exists) {
-                    return prev.map((c) => (c.id === newCls.id || c.code === newCls.code ? newCls : c));
-                  }
-                  return [newCls, ...prev];
-                });
-              } else if (payload.eventType === 'UPDATE' && payload.new) {
-                const row = payload.new;
-                setRawMaterialClassifications((prev) =>
-                  prev.map((c) =>
-                    c.id === String(row.id) || c.code === row.code
-                      ? {
-                          ...c,
-                          id: String(row.id),
-                          code: row.code || c.code,
-                          name: row.name || c.name,
-                          description: row.description ?? c.description,
-                          colorTag: row.color_tag || row.colorTag || c.colorTag || 'amber',
-                          status: row.status === 'Inactive' ? 'Inactive' : 'Active',
-                        }
-                      : c
-                  )
-                );
-              } else if (payload.eventType === 'DELETE' && payload.old) {
-                const row = payload.old;
-                setRawMaterialClassifications((prev) =>
-                  prev.filter((c) => c.id !== String(row.id) && c.code !== row.code)
-                );
+              return [newCat, ...prev];
+            });
+          } else if (evt.eventType === 'UPDATE' && evt.newRow) {
+            const row = evt.newRow;
+            setRawMaterialCategories((prev) =>
+              prev.map((c) =>
+                c.id === String(row.id) || c.code === row.code
+                  ? {
+                      ...c,
+                      id: String(row.id),
+                      code: row.code || c.code,
+                      name: row.name || c.name,
+                      description: row.description ?? c.description,
+                      status: row.status === 'Inactive' ? 'Inactive' : 'Active',
+                      parentClassification: row.parent_classification || c.parentClassification || '',
+                    }
+                  : c
+              )
+            );
+          } else if (evt.eventType === 'DELETE' && evt.oldRow) {
+            const row = evt.oldRow;
+            setRawMaterialCategories((prev) =>
+              prev.filter((c) => c.id !== String(row.id) && c.code !== row.code)
+            );
+          }
+          break;
+        }
+        case 'raw_material_classifications': {
+          if (evt.eventType === 'INSERT' && evt.newRow) {
+            const row = evt.newRow;
+            const newCls: RawMaterialClassification = {
+              id: String(row.id),
+              code: row.code || '',
+              name: row.name || '',
+              description: row.description || '',
+              colorTag: row.color_tag || row.colorTag || 'amber',
+              status: row.status === 'Inactive' ? 'Inactive' : 'Active',
+            };
+            setRawMaterialClassifications((prev) => {
+              const exists = prev.some((c) => c.id === newCls.id || c.code === newCls.code);
+              if (exists) {
+                return prev.map((c) => (c.id === newCls.id || c.code === newCls.code ? newCls : c));
               }
-            }
-          )
-          .subscribe();
-
-        whChannel = sb
-          .channel('realtime:warehouses')
-          .on(
-            'postgres_changes',
-            { event: '*', schema: 'public', table: 'warehouses' },
-            (payload: any) => {
-              if (payload.eventType === 'INSERT' && payload.new) {
-                const row = payload.new;
-                const newWh: Warehouse = {
-                  id: String(row.id),
-                  code: row.code || '',
-                  name: row.name || '',
-                  type: row.type || 'Regional Hub',
-                  district: row.district || 'Dhaka',
-                  location: row.location || '',
-                  managerName: row.manager_name || row.managerName || row.incharge_name || row.inchargeName || '',
-                  inchargeName: row.incharge_name || row.inchargeName || row.manager_name || row.managerName || '',
-                  phone: row.phone || row.incharge_phone || row.inchargePhone || '',
-                  inchargePhone: row.incharge_phone || row.inchargePhone || row.phone || '',
-                  email: row.email || undefined,
-                  capacityUnits: Number(row.capacity_units ?? row.capacityUnits ?? row.capacity_packs ?? row.capacityPacks) || 0,
-                  currentStockUnits: Number(row.current_stock_units ?? row.currentStockUnits ?? row.current_stock_packs ?? row.currentStockPacks) || 0,
-                  status: row.status === 'Inactive' ? 'Inactive' : 'Active',
-                  description: row.description || '',
-                  isFactoryPlant: Boolean(row.is_factory_plant ?? (row.type === 'Factory Plant')),
-                };
-                setWarehouses((prev) => {
-                  const exists = prev.some((w) => w.id === newWh.id || w.code === newWh.code);
-                  if (exists) {
-                    return prev.map((w) => (w.id === newWh.id || w.code === newWh.code ? newWh : w));
-                  }
-                  return [...prev, newWh];
-                });
-              } else if (payload.eventType === 'UPDATE' && payload.new) {
-                const row = payload.new;
-                setWarehouses((prev) =>
-                  prev.map((w) =>
-                    w.id === String(row.id) || w.code === row.code
-                      ? {
-                          ...w,
-                          id: String(row.id),
-                          code: row.code || w.code,
-                          name: row.name || w.name,
-                          type: row.type || w.type,
-                          district: row.district || w.district,
-                          location: row.location ?? w.location,
-                          managerName: row.manager_name ?? row.managerName ?? w.managerName,
-                          phone: row.phone ?? w.phone,
-                          email: row.email ?? w.email,
-                          capacityUnits: Number(row.capacity_units ?? row.capacityUnits ?? w.capacityUnits) || 0,
-                          currentStockUnits: Number(row.current_stock_units ?? row.currentStockUnits ?? w.currentStockUnits) || 0,
-                          status: row.status === 'Inactive' ? 'Inactive' : 'Active',
-                          description: row.description ?? w.description,
-                        }
-                      : w
-                  )
-                );
-              } else if (payload.eventType === 'DELETE' && payload.old) {
-                const row = payload.old;
-                setWarehouses((prev) =>
-                  prev.filter((w) => w.id !== String(row.id) && w.code !== row.code)
-                );
+              return [newCls, ...prev];
+            });
+          } else if (evt.eventType === 'UPDATE' && evt.newRow) {
+            const row = evt.newRow;
+            setRawMaterialClassifications((prev) =>
+              prev.map((c) =>
+                c.id === String(row.id) || c.code === row.code
+                  ? {
+                      ...c,
+                      id: String(row.id),
+                      code: row.code || c.code,
+                      name: row.name || c.name,
+                      description: row.description ?? c.description,
+                      colorTag: row.color_tag || row.colorTag || c.colorTag || 'amber',
+                      status: row.status === 'Inactive' ? 'Inactive' : 'Active',
+                    }
+                  : c
+              )
+            );
+          } else if (evt.eventType === 'DELETE' && evt.oldRow) {
+            const row = evt.oldRow;
+            setRawMaterialClassifications((prev) =>
+              prev.filter((c) => c.id !== String(row.id) && c.code !== row.code)
+            );
+          }
+          break;
+        }
+        case 'warehouses': {
+          if (evt.eventType === 'INSERT' && evt.newRow) {
+            const row = evt.newRow;
+            const newWh: Warehouse = {
+              id: String(row.id),
+              code: row.code || '',
+              name: row.name || '',
+              type: row.type || 'Regional Hub',
+              district: row.district || 'Dhaka',
+              location: row.location || '',
+              managerName: row.manager_name || row.managerName || row.incharge_name || row.inchargeName || '',
+              inchargeName: row.incharge_name || row.inchargeName || row.manager_name || row.managerName || '',
+              phone: row.phone || row.incharge_phone || row.inchargePhone || '',
+              inchargePhone: row.incharge_phone || row.inchargePhone || row.phone || '',
+              email: row.email || undefined,
+              capacityUnits: Number(row.capacity_units ?? row.capacityUnits ?? row.capacity_packs ?? row.capacityPacks) || 0,
+              currentStockUnits: Number(row.current_stock_units ?? row.currentStockUnits ?? row.current_stock_packs ?? row.currentStockPacks) || 0,
+              status: row.status === 'Inactive' ? 'Inactive' : 'Active',
+              description: row.description || '',
+              isFactoryPlant: Boolean(row.is_factory_plant ?? (row.type === 'Factory Plant')),
+            };
+            setWarehouses((prev) => {
+              const exists = prev.some((w) => w.id === newWh.id || w.code === newWh.code);
+              if (exists) {
+                return prev.map((w) => (w.id === newWh.id || w.code === newWh.code ? newWh : w));
               }
-            }
-          )
-          .subscribe();
-
-        soChannel = sb
-          .channel('realtime:sales_orders')
-          .on(
-            'postgres_changes',
-            { event: '*', schema: 'public', table: 'sales_orders' },
-            () => {
-              refreshSalesOrders();
-            }
-          )
-          .subscribe();
-
-        officeChannel = sb
-          .channel('realtime:office_locations')
-          .on(
-            'postgres_changes',
-            { event: '*', schema: 'public', table: 'office_locations' },
-            () => {
-              refreshOfficeLocations();
-            }
-          )
-          .subscribe();
-
-        insPlanChannel = sb
-          .channel('realtime:installment_plans')
-          .on(
-            'postgres_changes',
-            { event: '*', schema: 'public', table: 'installment_plans' },
-            () => {
-              refreshInstallmentData();
-            }
-          )
-          .subscribe();
-
-        insSchedChannel = sb
-          .channel('realtime:installment_schedules')
-          .on(
-            'postgres_changes',
-            { event: '*', schema: 'public', table: 'installment_schedules' },
-            () => {
-              refreshInstallmentData();
-            }
-          )
-          .subscribe();
-      } catch (err) {
-        console.warn('Supabase Realtime subscription notice:', err);
+              return [...prev, newWh];
+            });
+          } else if (evt.eventType === 'UPDATE' && evt.newRow) {
+            const row = evt.newRow;
+            setWarehouses((prev) =>
+              prev.map((w) =>
+                w.id === String(row.id) || w.code === row.code
+                  ? {
+                      ...w,
+                      id: String(row.id),
+                      code: row.code || w.code,
+                      name: row.name || w.name,
+                      type: row.type || w.type,
+                      district: row.district || w.district,
+                      location: row.location ?? w.location,
+                      managerName: row.manager_name ?? row.managerName ?? w.managerName,
+                      phone: row.phone ?? w.phone,
+                      email: row.email ?? w.email,
+                      capacityUnits: Number(row.capacity_units ?? row.capacityUnits ?? w.capacityUnits) || 0,
+                      currentStockUnits: Number(row.current_stock_units ?? row.currentStockUnits ?? w.currentStockUnits) || 0,
+                      status: row.status === 'Inactive' ? 'Inactive' : 'Active',
+                      description: row.description ?? w.description,
+                    }
+                  : w
+              )
+            );
+          } else if (evt.eventType === 'DELETE' && evt.oldRow) {
+            const row = evt.oldRow;
+            setWarehouses((prev) =>
+              prev.filter((w) => w.id !== String(row.id) && w.code !== row.code)
+            );
+          }
+          break;
+        }
+        default:
+          break;
       }
-    }
+    });
 
     const handleConfigChange = () => {
       refreshAllBasicData();
@@ -6593,42 +6437,13 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       window.addEventListener('ensec-supabase-config-changed', handleConfigChange);
       return () => {
         window.removeEventListener('ensec-supabase-config-changed', handleConfigChange);
-        if (rmcChannel && sb && typeof sb.removeChannel === 'function') {
-          sb.removeChannel(rmcChannel);
-        }
-        if (clsChannel && sb && typeof sb.removeChannel === 'function') {
-          sb.removeChannel(clsChannel);
-        }
-        if (whChannel && sb && typeof sb.removeChannel === 'function') {
-          sb.removeChannel(whChannel);
-        }
-        if (prodChannel && sb && typeof sb.removeChannel === 'function') {
-          sb.removeChannel(prodChannel);
-        }
-        if (catChannel && sb && typeof sb.removeChannel === 'function') {
-          sb.removeChannel(catChannel);
-        }
-        if (soChannel && sb && typeof sb.removeChannel === 'function') {
-          sb.removeChannel(soChannel);
-        }
-        if (bomChannel && sb && typeof sb.removeChannel === 'function') {
-          sb.removeChannel(bomChannel);
-        }
-        if (poChannel && sb && typeof sb.removeChannel === 'function') {
-          sb.removeChannel(poChannel);
-        }
-        if (officeChannel && sb && typeof sb.removeChannel === 'function') {
-          sb.removeChannel(officeChannel);
-        }
-        if (insPlanChannel && sb && typeof sb.removeChannel === 'function') {
-          sb.removeChannel(insPlanChannel);
-        }
-        if (insSchedChannel && sb && typeof sb.removeChannel === 'function') {
-          sb.removeChannel(insSchedChannel);
-        }
+        unsubscribeSse();
       };
     }
-  }, []);
+    return () => {
+      unsubscribeSse();
+    };
+  }, [isAuthenticated, currentUser?.id]);
 
   const addRawMaterialCategory = async (
     catData: Omit<RawMaterialCategory, 'id'>
@@ -7200,6 +7015,14 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
 
       if (insertRes.error) {
+        if (insertRes.error.code === 'DB_NOT_CONFIGURED') {
+          return {
+            success: true,
+            id: tempId,
+            error: insertRes.error.message,
+            isRemoteSynced: false,
+          };
+        }
         console.error('Supabase products insert/upsert error:', insertRes.error);
         return {
           success: false,
@@ -7298,6 +7121,9 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       const { error } = await query;
       if (error) {
+        if (error.code === 'DB_NOT_CONFIGURED') {
+          return { success: true };
+        }
         console.error('Supabase products update error:', error);
         return { success: false, error: error.message };
       } else {
@@ -7334,6 +7160,9 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       const { error } = await query;
       if (error) {
+        if (error.code === 'DB_NOT_CONFIGURED') {
+          return { success: true };
+        }
         console.error('Supabase products delete error:', error);
         return { success: false, error: error.message };
       } else {
@@ -16820,9 +16649,11 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const addUser = (userData: Omit<User, 'id'>): string => {
     const id = `u-${Date.now().toString().slice(-5)}`;
     const permissions = userData.permissions || getDefaultPermissionsForRole(userData.role);
+    const rawPassword = userData.password ? String(userData.password).trim() : '';
     const newUser: User = {
       ...userData,
       id,
+      password: '', // Never store plaintext password in frontend state
       permissions,
       status: userData.status || 'Active',
     };
@@ -16869,56 +16700,45 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     addAuditLog('USER_CREATED', 'User Management', `Created new user ${newUser.name} with role ${newUser.role}`);
 
-    // Sync newly created user to Supabase if configured
-    const sb = getSupabase();
-    if (sb) {
-      const userPayload: any = {
-        name: newUser.name,
-        email: newUser.email,
-        password: newUser.password || 'ensec2026',
-        phone: newUser.phone || null,
-        role: newUser.role,
-        designation: newUser.designation || null,
-        department: newUser.department || 'Operations',
-        status: newUser.status || 'Active',
-        uid: newUser.userId || id,
-        user_id: newUser.userId || id,
-        is_salesman: Boolean(newUser.isSalesman),
-        salesman_code: newUser.salesmanCode || null,
-        permissions: newUser.permissions || {},
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
-      (async () => {
-        try {
-          for (let attempt = 0; attempt < 8; attempt++) {
-            const { error: insErr } = await sb
-              .from('users')
-              .upsert(userPayload, { onConflict: 'email' });
-            if (!insErr) break;
-            const colMatch =
-              insErr.message.match(/column ["']?([a-zA-Z0-9_]+)["']? of relation ["']?users["']? does not exist/i) ||
-              insErr.message.match(/Could not find the ['"]?([a-zA-Z0-9_]+)['"]? column/i);
-            if (colMatch && colMatch[1] && colMatch[1] !== 'email') {
-              delete userPayload[colMatch[1]];
-              continue;
-            }
-            break;
-          }
-        } catch (e) {
-          console.warn('Supabase addUser sync notice:', e);
+    // Sync newly created user through backend gateway (bcrypt-hashed server-side)
+    const userPayload: any = {
+      name: newUser.name,
+      email: newUser.email,
+      ...(rawPassword ? { password: rawPassword } : {}),
+      phone: newUser.phone || null,
+      role: newUser.role,
+      designation: newUser.designation || null,
+      department: newUser.department || 'Operations',
+      status: newUser.status || 'Active',
+      uid: newUser.userId || id,
+      user_id: newUser.userId || id,
+      is_salesman: Boolean(newUser.isSalesman),
+      salesman_code: newUser.salesmanCode || null,
+      permissions: newUser.permissions || {},
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    backendDb
+      .from('users')
+      .upsert(userPayload, { onConflict: 'email' })
+      .then(({ error }) => {
+        if (error && error.code !== 'DB_NOT_CONFIGURED') {
+          console.warn('Backend addUser sync notice:', error.message);
         }
-      })();
-    }
+      });
 
     return id;
   };
 
   const updateUser = (userId: string, updates: Partial<User>) => {
+    const rawPasswordUpdate = updates.password ? String(updates.password).trim() : '';
+    const safeUpdates: Partial<User> = { ...updates };
+    delete safeUpdates.password;
+
     setUsers((prev) =>
       prev.map((u) => {
         if (u.id === userId) {
-          const updated = { ...u, ...updates };
+          const updated = { ...u, ...safeUpdates, password: '' };
           if (currentUser.id === userId) {
             setCurrentUser(updated);
           }
@@ -16929,49 +16749,33 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
     addAuditLog('USER_UPDATED', 'User Management', `Updated profile details for user ID ${userId}`);
 
-    // Sync profile updates to Supabase if configured
-    const sb = getSupabase();
-    if (sb) {
-      const target = users.find((u) => u.id === userId);
-      const email = target?.email || (updates as any).email;
-      if (email) {
-        const supaUpdates: any = {
-          updated_at: new Date().toISOString(),
-        };
-        if (updates.name) supaUpdates.name = updates.name;
-        if (updates.userId !== undefined) supaUpdates.user_id = updates.userId;
-        if (updates.phone !== undefined) supaUpdates.phone = updates.phone;
-        if (updates.role) supaUpdates.role = updates.role;
-        if (updates.designation !== undefined) supaUpdates.designation = updates.designation;
-        if (updates.department !== undefined) supaUpdates.department = updates.department;
-        if (updates.status) supaUpdates.status = updates.status;
-        if (updates.isSalesman !== undefined) supaUpdates.is_salesman = updates.isSalesman;
-        if (updates.salesmanCode !== undefined) supaUpdates.salesman_code = updates.salesmanCode;
-        if (updates.permissions) supaUpdates.permissions = updates.permissions;
-        if (updates.password) supaUpdates.password = updates.password;
+    const target = users.find((u) => u.id === userId);
+    const email = target?.email || (updates as any).email;
+    if (email) {
+      const supaUpdates: any = {
+        updated_at: new Date().toISOString(),
+      };
+      if (updates.name) supaUpdates.name = updates.name;
+      if (updates.userId !== undefined) supaUpdates.user_id = updates.userId;
+      if (updates.phone !== undefined) supaUpdates.phone = updates.phone;
+      if (updates.role) supaUpdates.role = updates.role;
+      if (updates.designation !== undefined) supaUpdates.designation = updates.designation;
+      if (updates.department !== undefined) supaUpdates.department = updates.department;
+      if (updates.status) supaUpdates.status = updates.status;
+      if (updates.isSalesman !== undefined) supaUpdates.is_salesman = updates.isSalesman;
+      if (updates.salesmanCode !== undefined) supaUpdates.salesman_code = updates.salesmanCode;
+      if (updates.permissions) supaUpdates.permissions = updates.permissions;
+      if (rawPasswordUpdate) supaUpdates.password = rawPasswordUpdate;
 
-        (async () => {
-          try {
-            for (let attempt = 0; attempt < 8; attempt++) {
-              const { error: updErr } = await sb
-                .from('users')
-                .update(supaUpdates)
-                .ilike('email', email);
-              if (!updErr) break;
-              const colMatch =
-                updErr.message.match(/column ["']?([a-zA-Z0-9_]+)["']? of relation ["']?users["']? does not exist/i) ||
-                updErr.message.match(/Could not find the ['"]?([a-zA-Z0-9_]+)['"]? column/i);
-              if (colMatch && colMatch[1]) {
-                delete supaUpdates[colMatch[1]];
-                continue;
-              }
-              break;
-            }
-          } catch (e) {
-            console.warn('Supabase updateUser sync notice:', e);
+      backendDb
+        .from('users')
+        .update(supaUpdates)
+        .ilike('email', email)
+        .then(({ error }) => {
+          if (error && error.code !== 'DB_NOT_CONFIGURED') {
+            console.warn('Backend updateUser sync notice:', error.message);
           }
-        })();
-      }
+        });
     }
   };
 
@@ -16984,7 +16788,6 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return { success: false, error: 'Password must be at least 4 characters long.' };
     }
 
-    // 1. Locate the target user synchronously
     const targetUser = users.find(
       (u) =>
         u.id === userId ||
@@ -16995,241 +16798,48 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const userName = targetUser?.name || userId;
     const userEmail = targetUser?.email?.trim().toLowerCase();
 
-    // 2. Update local state immediately
-    setUsers((prev) =>
-      prev.map((u) => {
-        if (
-          u.id === userId ||
-          u.userId === userId ||
-          (userEmail && u.email?.toLowerCase() === userEmail)
-        ) {
-          const updated = { ...u, password: cleanPassword };
-          if (currentUser.id === u.id || (userEmail && currentUser.email?.toLowerCase() === userEmail)) {
-            setCurrentUser(updated);
-          }
-          return updated;
-        }
-        return u;
-      })
-    );
-
-    addAuditLog(
-      'PASSWORD_CHANGED',
-      'Security & Access Control',
-      `Password successfully changed for user ${userName} (${targetUser?.userId || userEmail || userId})`
-    );
-
-    // 3. Supabase Database Persistence
-    const sb = getSupabase();
-    if (!sb) {
-      return {
-        success: true,
-        warning: 'Supabase credentials are not configured. Saved in local storage.',
-      };
-    }
-
     try {
-      // Step A: Locate existing row in public.users table by email or uid
-      let existingSbUser: any = null;
-      if (userEmail) {
-        const { data: foundByEmail, error: findEmailErr } = await sb
-          .from('users')
-          .select('id, email, name')
-          .ilike('email', userEmail)
-          .limit(1);
-
-        if (findEmailErr) {
-          const findMsg = (findEmailErr.message || '').toLowerCase();
-          if (findEmailErr.code === '42P01' || findMsg.includes('does not exist') || findMsg.includes('relation')) {
-            return {
-              success: false,
-              error: 'Table "users" does not exist in your Supabase project. Please execute the SQL schema in Supabase SQL Editor.',
-              sqlFix: 'CREATE TABLE IF NOT EXISTS public.users (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL, password TEXT DEFAULT \'ensec2026\', role TEXT DEFAULT \'Field Force\', status TEXT DEFAULT \'Active\');',
-            };
-          }
-          if (findEmailErr.code === '42501' || findMsg.includes('policy') || findMsg.includes('security')) {
-            return {
-              success: false,
-              error: `Supabase RLS is blocking access to table "users" (${findEmailErr.message}). Run: CREATE POLICY "Allow public access" ON public.users FOR ALL USING (true) WITH CHECK (true);`,
-              sqlFix: 'CREATE POLICY "Allow public access" ON public.users FOR ALL USING (true) WITH CHECK (true);',
-            };
-          }
-        } else if (foundByEmail && foundByEmail.length > 0) {
-          existingSbUser = foundByEmail[0];
+      const res = await apiRequest<{ success: boolean; warning?: string; error?: string }>(
+        `/api/erp/users/${encodeURIComponent(targetUser?.id || userId)}/password`,
+        {
+          method: 'PUT',
+          body: JSON.stringify({
+            newPassword: cleanPassword,
+            email: userEmail,
+            userId: targetUser?.userId || userId,
+            name: targetUser?.name,
+            phone: targetUser?.phone,
+            role: targetUser?.role,
+            designation: targetUser?.designation,
+            department: targetUser?.department,
+            status: targetUser?.status,
+            permissions: targetUser?.permissions,
+          }),
         }
-      }
+      );
 
-      if (!existingSbUser && (targetUser?.userId || targetUser?.id)) {
-        const { data: foundByUid } = await sb
-          .from('users')
-          .select('id, email, name')
-          .eq('uid', targetUser?.userId || targetUser?.id)
-          .limit(1);
-        if (foundByUid && foundByUid.length > 0) {
-          existingSbUser = foundByUid[0];
-        }
-      }
-
-      // Step B: If row already exists in public.users, UPDATE it
-      if (existingSbUser) {
-        let updatePayload: any = {
-          password: cleanPassword,
-          updated_at: new Date().toISOString(),
-        };
-
-        let updateSuccess = false;
-        let lastUpdateErr: any = null;
-
-        for (let attempt = 0; attempt < 5; attempt++) {
-          const query = existingSbUser.id
-            ? sb.from('users').update(updatePayload).eq('id', existingSbUser.id)
-            : sb.from('users').update(updatePayload).ilike('email', userEmail!);
-
-          const { data: updData, error: updErr } = await query.select();
-
-          if (!updErr) {
-            updateSuccess = true;
-            break;
-          }
-
-          lastUpdateErr = updErr;
-          const errMsg = (updErr.message || '').toLowerCase();
-
-          // Column password missing
-          if (updErr.code === '42703' && errMsg.includes('password')) {
-            return {
-              success: false,
-              error: `Supabase table "users" is missing the "password" column. Please run this in your Supabase SQL Editor: ALTER TABLE public.users ADD COLUMN IF NOT EXISTS password TEXT DEFAULT 'ensec2026';`,
-              sqlFix: 'ALTER TABLE public.users ADD COLUMN IF NOT EXISTS password TEXT DEFAULT \'ensec2026\';',
-            };
-          }
-
-          // Strip updated_at if not present
-          if (updErr.code === '42703' && errMsg.includes('updated_at')) {
-            delete updatePayload.updated_at;
-            continue;
-          }
-
-          // RLS error
-          if (updErr.code === '42501' || errMsg.includes('policy')) {
-            return {
-              success: false,
-              error: `Supabase RLS is blocking updates to table "users" (${updErr.message}). Add a permissive RLS policy.`,
-              sqlFix: 'CREATE POLICY "Allow public access" ON public.users FOR ALL USING (true) WITH CHECK (true);',
-            };
-          }
-
-          break;
-        }
-
-        if (!updateSuccess && lastUpdateErr) {
-          return {
-            success: false,
-            error: `Failed to update password in Supabase: ${lastUpdateErr.message}`,
-          };
-        }
-
-        await refreshUsers();
-        return { success: true };
-      }
-
-      // Step C: If user row does NOT exist yet in public.users, INSERT / UPSERT them with password!
-      const insertPayload: any = {
-        name: targetUser?.name || userName || 'Ensec Staff',
-        email: userEmail || `${(targetUser?.userId || userId).toLowerCase()}@ensecbd.com`,
-        password: cleanPassword,
-        phone: targetUser?.phone || null,
-        role: targetUser?.role || 'Field Force',
-        designation: targetUser?.designation || null,
-        department: targetUser?.department || 'Operations',
-        status: targetUser?.status || 'Active',
-        uid: targetUser?.userId || targetUser?.id || userId,
-        permissions: targetUser?.permissions || {},
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      };
-
-      let insertSuccess = false;
-      let lastInsertErr: any = null;
-
-      for (let attempt = 0; attempt < 8; attempt++) {
-        const { data: insData, error: insErr } = await sb
-          .from('users')
-          .upsert(insertPayload, { onConflict: 'email' })
-          .select();
-
-        if (!insErr) {
-          insertSuccess = true;
-          break;
-        }
-
-        lastInsertErr = insErr;
-        const msg = (insErr.message || '').toLowerCase();
-
-        // If password column missing:
-        if (insErr.code === '42703' && msg.includes('password')) {
-          return {
-            success: false,
-            error: `Supabase table "users" is missing the "password" column. Please run this in your Supabase SQL Editor: ALTER TABLE public.users ADD COLUMN IF NOT EXISTS password TEXT DEFAULT 'ensec2026';`,
-            sqlFix: 'ALTER TABLE public.users ADD COLUMN IF NOT EXISTS password TEXT DEFAULT \'ensec2026\';',
-          };
-        }
-
-        // If other optional column missing, strip and retry
-        const colMatch =
-          insErr.message.match(/column ["']?([a-zA-Z0-9_]+)["']? of relation ["']?users["']? does not exist/i) ||
-          insErr.message.match(/Could not find the ['"]?([a-zA-Z0-9_]+)['"]? column/i);
-        if (colMatch && colMatch[1] && colMatch[1] !== 'password' && colMatch[1] !== 'email') {
-          delete insertPayload[colMatch[1]];
-          continue;
-        }
-
-        // RLS error
-        if (insErr.code === '42501' || msg.includes('policy')) {
-          return {
-            success: false,
-            error: `Supabase RLS is blocking inserts to table "users" (${insErr.message}). Add a permissive RLS policy.`,
-            sqlFix: 'CREATE POLICY "Allow public access" ON public.users FOR ALL USING (true) WITH CHECK (true);',
-          };
-        }
-
-        break;
-      }
-
-      if (!insertSuccess && lastInsertErr) {
-        return {
-          success: false,
-          error: `Supabase failed to save user into users table: ${lastInsertErr.message}`,
-        };
-      }
+      addAuditLog(
+        'PASSWORD_CHANGED',
+        'Security & Access Control',
+        `Password successfully updated for user ${userName} (${targetUser?.userId || userEmail || userId})`
+      );
 
       await refreshUsers();
-      return { success: true };
+      return {
+        success: Boolean(res?.success),
+        warning: res?.warning,
+      };
     } catch (err: any) {
-      console.error('Exception updating user password in Supabase:', err);
       return {
         success: false,
-        error: err.message || 'Unexpected exception updating password in Supabase.',
+        error: err?.message || 'Failed to update password.',
       };
     }
   };
 
   const syncAllUsersToSupabase = async (): Promise<{ success: boolean; count: number; error?: string; sqlFix?: string }> => {
-    const sb = getSupabase();
-    if (!sb) {
-      return { success: false, count: 0, error: 'Supabase credentials are not connected.' };
-    }
-    let successCount = 0;
-    for (const u of users) {
-      const res = await updateUserPassword(u.id, u.password || 'ensec2026');
-      if (res.success) {
-        successCount++;
-      } else if (res.sqlFix) {
-        return { success: false, count: successCount, error: res.error, sqlFix: res.sqlFix };
-      }
-    }
     await refreshUsers();
-    return { success: true, count: successCount };
+    return { success: true, count: users.length };
   };
 
   const updateUserPermissions = async (
@@ -17252,12 +16862,14 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         (targetUser?.id && u.id === targetUser.id);
 
       if (isMatch) {
-        const updated = { ...u, permissions };
+        const updated = { ...u, permissions, password: '' };
         updatedUserObj = updated;
         if (currentUser.id === u.id || (targetUser?.email && currentUser.email?.toLowerCase() === targetUser.email.toLowerCase())) {
           setCurrentUser(updated);
           if (typeof window !== 'undefined') {
-            localStorage.setItem('ensec_erp_user', JSON.stringify(updated));
+            const { password: _cp, ...safeUpdated } = updated;
+            localStorage.setItem('ensec_erp_user', JSON.stringify(safeUpdated));
+            localStorage.setItem('ensec_erp_session_user', JSON.stringify(safeUpdated));
           }
         }
         return updated;
@@ -17267,9 +16879,11 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     setUsers(updatedUsers);
     if (typeof window !== 'undefined') {
-      localStorage.setItem('ensec_erp_users', JSON.stringify(updatedUsers));
+      const sanitizedUsers = updatedUsers.map(({ password: _p, ...safe }) => safe);
+      localStorage.setItem('ensec_erp_users', JSON.stringify(sanitizedUsers));
       fetch('/api/manufacturing/sync-state', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           users: updatedUsers.map((u) => ({
@@ -17301,7 +16915,6 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const email = targetUser?.email || updatedUserObj?.email;
         const uid = targetUser?.userId || updatedUserObj?.userId || targetUser?.id || updatedUserObj?.id || userId;
 
-        // Locate existing user in Supabase by email, uid, or id
         let existingSbUser: any = null;
         if (email) {
           const { data: foundByEmail } = await sb
@@ -17325,7 +16938,6 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
 
         if (existingSbUser) {
-          // UPDATE existing row
           let updatePayload: any = {
             permissions: permissions,
             updated_at: new Date().toISOString(),
@@ -17343,12 +16955,10 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             }
 
             const errMsg = (updErr.message || '').toLowerCase();
-            // If updated_at column does not exist, strip and retry
             if (updErr.code === '42703' && errMsg.includes('updated_at')) {
               delete updatePayload.updated_at;
               continue;
             }
-            // If permissions needs to be serialized as string for TEXT column
             if (errMsg.includes('text') || errMsg.includes('string') || errMsg.includes('malformed')) {
               updatePayload.permissions = JSON.stringify(permissions);
               continue;
@@ -17357,11 +16967,9 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             break;
           }
         } else {
-          // INSERT or UPSERT user with permissions
           const insertPayload: any = {
             name: targetUser?.name || updatedUserObj?.name || 'Ensec Staff',
             email: email || `${String(uid).toLowerCase()}@ensecbd.com`,
-            password: targetUser?.password || updatedUserObj?.password || 'ensec2026',
             phone: targetUser?.phone || updatedUserObj?.phone || null,
             role: targetUser?.role || updatedUserObj?.role || 'Field Force',
             designation: targetUser?.designation || updatedUserObj?.designation || null,
@@ -18983,6 +18591,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setOfficeLocations((prev) => [newLoc, ...prev]);
 
     const sb = getSupabase();
+    let officeSyncedRemotely = false;
     if (sb) {
       try {
         const { data, error } = await sb
@@ -19004,7 +18613,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           )
           .select();
 
-        if (error) {
+        if (error && error.code !== 'DB_NOT_CONFIGURED') {
           console.error('Supabase office_locations insert failed:', error);
           setOfficeLocations(prevLocations);
           return {
@@ -19014,28 +18623,31 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           };
         }
 
-        if (typeof window !== 'undefined') {
-          localStorage.setItem('ensec_office_locations_seeded_v1', 'true');
-        }
+        if (!error) {
+          officeSyncedRemotely = true;
+          if (typeof window !== 'undefined') {
+            localStorage.setItem('ensec_office_locations_seeded_v1', 'true');
+          }
 
-        if (Array.isArray(data) && data[0]) {
-          const confirmed = data[0];
-          const confirmedLoc: OfficeLocation = {
-            id: String(confirmed.id),
-            code: confirmed.code || undefined,
-            name: confirmed.name || newLoc.name,
-            address: confirmed.address ?? newLoc.address,
-            latitude: Number(confirmed.latitude),
-            longitude: Number(confirmed.longitude),
-            allowedRadiusMeters:
-              Number(confirmed.allowed_radius_meters) || newLoc.allowedRadiusMeters,
-            status: confirmed.status === 'Inactive' ? 'Inactive' : 'Active',
-            createdAt: confirmed.created_at || nowIso,
-            updatedAt: confirmed.updated_at || nowIso,
-          };
-          setOfficeLocations((prev) =>
-            prev.map((loc) => (loc.id === newLoc.id ? confirmedLoc : loc))
-          );
+          if (Array.isArray(data) && data[0]) {
+            const confirmed = data[0];
+            const confirmedLoc: OfficeLocation = {
+              id: String(confirmed.id),
+              code: confirmed.code || undefined,
+              name: confirmed.name || newLoc.name,
+              address: confirmed.address ?? newLoc.address,
+              latitude: Number(confirmed.latitude),
+              longitude: Number(confirmed.longitude),
+              allowedRadiusMeters:
+                Number(confirmed.allowed_radius_meters) || newLoc.allowedRadiusMeters,
+              status: confirmed.status === 'Inactive' ? 'Inactive' : 'Active',
+              createdAt: confirmed.created_at || nowIso,
+              updatedAt: confirmed.updated_at || nowIso,
+            };
+            setOfficeLocations((prev) =>
+              prev.map((loc) => (loc.id === newLoc.id ? confirmedLoc : loc))
+            );
+          }
         }
       } catch (err: any) {
         console.error('Exception saving office location to Supabase:', err);
@@ -19057,8 +18669,9 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       await fetch('/api/office-locations', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...newLoc, skipSupabaseSync: Boolean(sb) }),
+        body: JSON.stringify({ ...newLoc, skipSupabaseSync: officeSyncedRemotely }),
       });
     } catch {}
 
@@ -19160,6 +18773,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     );
 
     const sb = getSupabase();
+    let officeUpdatedRemotely = false;
     if (sb) {
       try {
         const { data, error } = await sb
@@ -19180,7 +18794,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           )
           .select();
 
-        if (error) {
+        if (error && error.code !== 'DB_NOT_CONFIGURED') {
           console.error('Supabase office_locations update failed:', error);
           setOfficeLocations(prevLocations);
           setFieldForceReps(prevReps);
@@ -19190,48 +18804,51 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           };
         }
 
-        if (typeof window !== 'undefined') {
-          localStorage.setItem('ensec_office_locations_seeded_v1', 'true');
-        }
+        if (!error) {
+          officeUpdatedRemotely = true;
+          if (typeof window !== 'undefined') {
+            localStorage.setItem('ensec_office_locations_seeded_v1', 'true');
+          }
 
-        if (Array.isArray(data) && data[0]) {
-          const confirmed = data[0];
-          const confirmedLoc: OfficeLocation = {
-            id: String(confirmed.id),
-            code: confirmed.code || undefined,
-            name: confirmed.name || mergedOffice.name,
-            address: confirmed.address ?? mergedOffice.address,
-            latitude: Number(confirmed.latitude),
-            longitude: Number(confirmed.longitude),
-            allowedRadiusMeters:
-              Number(confirmed.allowed_radius_meters) || mergedOffice.allowedRadiusMeters,
-            status: confirmed.status === 'Inactive' ? 'Inactive' : 'Active',
-            createdAt: confirmed.created_at || mergedOffice.createdAt,
-            updatedAt: confirmed.updated_at || nowIso,
-          };
-          setOfficeLocations((prev) =>
-            prev.map((loc) => (loc.id === id ? confirmedLoc : loc))
-          );
-        }
+          if (Array.isArray(data) && data[0]) {
+            const confirmed = data[0];
+            const confirmedLoc: OfficeLocation = {
+              id: String(confirmed.id),
+              code: confirmed.code || undefined,
+              name: confirmed.name || mergedOffice.name,
+              address: confirmed.address ?? mergedOffice.address,
+              latitude: Number(confirmed.latitude),
+              longitude: Number(confirmed.longitude),
+              allowedRadiusMeters:
+                Number(confirmed.allowed_radius_meters) || mergedOffice.allowedRadiusMeters,
+              status: confirmed.status === 'Inactive' ? 'Inactive' : 'Active',
+              createdAt: confirmed.created_at || mergedOffice.createdAt,
+              updatedAt: confirmed.updated_at || nowIso,
+            };
+            setOfficeLocations((prev) =>
+              prev.map((loc) => (loc.id === id ? confirmedLoc : loc))
+            );
+          }
 
-        // Persist cascaded office coordinate/name/radius updates to assigned employees in Supabase
-        const hasAssignedReps = prevReps.some((rep) => rep.assignedOfficeId === id);
-        if (hasAssignedReps) {
-          sb.from('field_force_reps')
-            .update({
-              assigned_office_name: mergedOffice.name,
-              office_latitude: mergedOffice.latitude,
-              office_longitude: mergedOffice.longitude,
-              allowed_radius_meters: mergedOffice.allowedRadiusMeters,
-              office_address: mergedOffice.address,
-              location_status: mergedOffice.status,
-            })
-            .eq('assigned_office_id', id)
-            .then(({ error: repErr }) => {
-              if (repErr && repErr.code !== '42703') {
-                console.warn('Notice syncing updated office coordinates to field_force_reps:', repErr.message);
-              }
-            });
+          // Persist cascaded office coordinate/name/radius updates to assigned employees in Supabase
+          const hasAssignedReps = prevReps.some((rep) => rep.assignedOfficeId === id);
+          if (hasAssignedReps) {
+            sb.from('field_force_reps')
+              .update({
+                assigned_office_name: mergedOffice.name,
+                office_latitude: mergedOffice.latitude,
+                office_longitude: mergedOffice.longitude,
+                allowed_radius_meters: mergedOffice.allowedRadiusMeters,
+                office_address: mergedOffice.address,
+                location_status: mergedOffice.status,
+              })
+              .eq('assigned_office_id', id)
+              .then(({ error: repErr }) => {
+                if (repErr && repErr.code !== '42703' && repErr.code !== 'DB_NOT_CONFIGURED') {
+                  console.warn('Notice syncing updated office coordinates to field_force_reps:', repErr.message);
+                }
+              });
+          }
         }
       } catch (err: any) {
         console.error('Exception updating office location in Supabase:', err);
@@ -19249,8 +18866,9 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       await fetch(`/api/office-locations/${encodeURIComponent(id)}`, {
         method: 'PUT',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ...mergedOffice, skipSupabaseSync: Boolean(sb) }),
+        body: JSON.stringify({ ...mergedOffice, skipSupabaseSync: officeUpdatedRemotely }),
       });
     } catch {}
 
@@ -19262,10 +18880,11 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setOfficeLocations((prev) => prev.filter((loc) => loc.id !== id));
 
     const sb = getSupabase();
+    let officeDeletedRemotely = false;
     if (sb) {
       try {
         const { error } = await sb.from('office_locations').delete().eq('id', id);
-        if (error) {
+        if (error && error.code !== 'DB_NOT_CONFIGURED') {
           console.error('Supabase office_locations delete failed:', error);
           setOfficeLocations(prevLocations);
           return {
@@ -19273,8 +18892,11 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             error: formatOfficeLocationSupabaseError(error),
           };
         }
-        if (typeof window !== 'undefined') {
-          localStorage.setItem('ensec_office_locations_seeded_v1', 'true');
+        if (!error) {
+          officeDeletedRemotely = true;
+          if (typeof window !== 'undefined') {
+            localStorage.setItem('ensec_office_locations_seeded_v1', 'true');
+          }
         }
       } catch (err: any) {
         console.error('Exception deleting office location from Supabase:', err);
@@ -19290,8 +18912,8 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     try {
       await fetch(
-        `/api/office-locations/${encodeURIComponent(id)}${sb ? '?skipSupabaseSync=1' : ''}`,
-        { method: 'DELETE' }
+        `/api/office-locations/${encodeURIComponent(id)}${officeDeletedRemotely ? '?skipSupabaseSync=1' : ''}`,
+        { method: 'DELETE', credentials: 'include' }
       );
     } catch {}
 
@@ -19444,6 +19066,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const resp = await fetch('/api/attendance/check-in', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           ...getErpAuthHeaders(),
           ...(source === 'mobile-field' ? { 'x-mobile-portal': 'true' } : {}),
@@ -19644,6 +19267,7 @@ export const ERPProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       const resp = await fetch('/api/attendance/check-out', {
         method: 'POST',
+        credentials: 'include',
         headers: {
           ...getErpAuthHeaders(),
           ...(source === 'mobile-field' ? { 'x-mobile-portal': 'true' } : {}),

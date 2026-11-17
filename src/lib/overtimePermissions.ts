@@ -235,11 +235,10 @@ export function sanitizeOvertimeRecordForUser<T extends Record<string, any>>(rec
   return copy as T;
 }
 
-export function getOvertimeAuthHeaders(user: any): Record<string, string> {
-  if (!user) return {};
-  const headers: Record<string, string> = {};
-  if (user.id) headers['x-user-id'] = String(user.id);
-  if (user.userId) headers['x-user-code'] = String(user.userId);
-  if (user.email) headers['x-user-email'] = String(user.email);
-  return headers;
+/**
+ * Authentication is carried via HttpOnly session cookies (`credentials: 'include'`).
+ * Never send client-supplied x-user-* identity headers.
+ */
+export function getOvertimeAuthHeaders(_user: any): Record<string, string> {
+  return {};
 }

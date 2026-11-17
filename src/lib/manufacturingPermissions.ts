@@ -274,15 +274,11 @@ export function sanitizeMaterialIssueContextForUser(
 }
 
 /**
- * Helper to attach requester identity headers for backend/API authorization verification.
+ * Authentication is carried via HttpOnly session cookies (`credentials: 'include'`).
+ * Never send client-supplied x-user-* identity headers.
  */
-export function getManufacturingAuthHeaders(user: any): Record<string, string> {
-  if (!user) return {};
-  const headers: Record<string, string> = {};
-  if (user.id) headers['x-user-id'] = String(user.id);
-  if (user.userId) headers['x-user-code'] = String(user.userId);
-  if (user.email) headers['x-user-email'] = String(user.email);
-  return headers;
+export function getManufacturingAuthHeaders(_user: any): Record<string, string> {
+  return {};
 }
 
 export const BOM_VISIBILITY_PERMISSION_KEYS = {

@@ -78,7 +78,7 @@ import {
 import { syncAllERPEventsToAccounting } from '../utils/erpAccountingSync.ts';
 import { useERP } from './ERPContext.tsx';
 import { SalesOrder } from '../types/erp.ts';
-import { getSupabase } from '../lib/supabase.ts';
+import { backendDb } from '../lib/apiClient.ts';
 
 const STORAGE_KEYS = {
   CASH_ACCOUNTS: 'ensec_cash_bank_accounts',
@@ -337,6 +337,7 @@ function loadLS<T>(key: string, fallback: T): T {
 export const CashBankProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
   const {
     currentUser,
+    isAuthenticated,
     addAuditLog,
     salesOrders,
     products,
@@ -500,18 +501,17 @@ export const CashBankProvider: React.FC<{ children: ReactNode }> = ({ children }
     });
   }, [accounts]);
 
-  // Best-effort initial fetch from Supabase if Section 45 tables have been deployed
+  // Best-effort initial fetch from centralized backend gateway once authenticated
   useEffect(() => {
+    if (!isAuthenticated || !currentUser?.id) return;
     let mounted = true;
     const hydrateFromSupabase = async () => {
-      const sb = getSupabase();
-      if (!sb) return;
       try {
         const [coaRes, fyRes, vRes, glRes] = await Promise.all([
-          sb.from('chart_of_accounts').select('*').limit(500),
-          sb.from('financial_years').select('*, accounting_periods(*)').limit(50),
-          sb.from('accounting_vouchers').select('*, accounting_voucher_lines(*)').order('voucher_date', { ascending: false }).limit(500),
-          sb.from('general_ledger_entries').select('*').order('entry_date', { ascending: false }).limit(1500),
+          backendDb.from('chart_of_accounts').select('*').limit(500),
+          backendDb.from('financial_years').select('*, accounting_periods(*)').limit(50),
+          backendDb.from('accounting_vouchers').select('*, accounting_voucher_lines(*)').order('voucher_date', { ascending: false }).limit(500),
+          backendDb.from('general_ledger_entries').select('*').order('entry_date', { ascending: false }).limit(1500),
         ]);
 
         if (!mounted) return;
@@ -657,14 +657,12 @@ export const CashBankProvider: React.FC<{ children: ReactNode }> = ({ children }
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [isAuthenticated, currentUser?.id]);
 
-  // Safe background Supabase upsert helper (never breaks UI if SQL not run yet)
+  // Safe background backend upsert helper
   const syncVoucherToSupabase = async (voucher: JournalVoucher, newGL: GeneralLedgerEntry[]) => {
-    const sb = getSupabase();
-    if (!sb) return;
     try {
-      await sb.from('accounting_vouchers').upsert({
+      await backendDb.from('accounting_vouchers').upsert({
         id: voucher.id,
         voucher_no: voucher.voucherNo,
         voucher_type: voucher.voucherType,
@@ -697,7 +695,7 @@ export const CashBankProvider: React.FC<{ children: ReactNode }> = ({ children }
       });
 
       if (voucher.lines.length > 0) {
-        await sb.from('accounting_voucher_lines').upsert(
+        await backendDb.from('accounting_voucher_lines').upsert(
           voucher.lines.map((l) => ({
             id: l.id,
             voucher_id: voucher.id,
@@ -717,7 +715,7 @@ export const CashBankProvider: React.FC<{ children: ReactNode }> = ({ children }
       }
 
       if (newGL.length > 0) {
-        await sb.from('general_ledger_entries').upsert(
+        await backendDb.from('general_ledger_entries').upsert(
           newGL.map((g) => ({
             id: g.id,
             voucher_id: g.voucherId,

@@ -6,13 +6,29 @@ import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import {
   getServerSupabase,
-  getServerDbConfig,
   getPublicSafeDatabaseSummary,
   checkServerDatabaseStatus,
   verifyDatabaseSchema,
   getDbAuditEvents,
   recordDbAuditEvent,
+  sanitizeDatabaseError,
 } from './server/db/index.ts';
+import {
+  extractSessionToken,
+  createSessionForUser,
+  revokeSessionToken,
+  setSessionCookie,
+  clearSessionCookie,
+  findRawUserRecordByIdentifier,
+  verifyPasswordAndMigrateHash,
+  sanitizeUserForClient,
+  hashPassword,
+  indexUserInAuthCache,
+  resolveRequestUser,
+} from './server/auth/authService.ts';
+import { registerEventsRoutes, emitErpTableEvent } from './server/routes/events.ts';
+import { registerErpGatewayRoutes } from './server/routes/erpGateway.ts';
+import { hasPageAction } from './src/types/pagePermissions.ts';
 import {
   DEFAULT_ALLOWED_RADIUS_METERS,
   DEFAULT_GRACE_PERIOD_MINUTES,
@@ -289,9 +305,25 @@ export function createAppServer() {
   });
 
   // --------------------------------------------------------------------------
-  // Office Locations CRUD
+  // Office Locations CRUD (Authenticated & RBAC Enforced)
   // --------------------------------------------------------------------------
-  app.get('/api/office-locations', async (_req, res) => {
+  app.get('/api/office-locations', async (req, res) => {
+    const caller = await resolveRequestUser(req);
+    if (!caller) {
+      return res.status(401).json({ error: 'Authentication required.' });
+    }
+    const canView =
+      caller.role === 'Super Admin' ||
+      hasPageAction(caller, 'basic-data-warehouses', 'view') ||
+      hasPageAction(caller, 'payroll', 'view') ||
+      hasPageAction(caller, 'mobile-field', 'view') ||
+      hasPageAction(caller, 'overtime-management', 'view') ||
+      hasPageAction(caller, 'field-tracker', 'view') ||
+      hasPageAction(caller, 'dashboard', 'view');
+    if (!canView) {
+      return res.status(403).json({ error: 'Forbidden: Missing permission to view office locations.' });
+    }
+
     if (getDb()) {
       try {
         const { data, error } = await getDb()
@@ -319,7 +351,18 @@ export function createAppServer() {
     res.json({ locations: Array.from(officeLocationsStore.values()) });
   });
 
-  app.post('/api/office-locations/sync', (req, res) => {
+  app.post('/api/office-locations/sync', async (req, res) => {
+    const caller = await resolveRequestUser(req);
+    if (!caller) {
+      return res.status(401).json({ error: 'Authentication required.' });
+    }
+    const canSync =
+      caller.role === 'Super Admin' ||
+      hasPageAction(caller, 'basic-data-warehouses', 'edit') ||
+      hasPageAction(caller, 'payroll', 'edit');
+    if (!canSync) {
+      return res.status(403).json({ error: 'Forbidden: Insufficient permissions to sync office locations.' });
+    }
     const locations = Array.isArray(req.body?.locations) ? req.body.locations : [];
     for (const loc of locations) {
       if (loc && loc.id && loc.name) {
@@ -339,6 +382,19 @@ export function createAppServer() {
   });
 
   app.post('/api/office-locations', async (req, res) => {
+    const caller = await resolveRequestUser(req);
+    if (!caller) {
+      return res.status(401).json({ error: 'Authentication required.' });
+    }
+    const canCreate =
+      caller.role === 'Super Admin' ||
+      hasPageAction(caller, 'basic-data-warehouses', 'create') ||
+      hasPageAction(caller, 'payroll', 'create') ||
+      hasPageAction(caller, 'payroll', 'edit');
+    if (!canCreate) {
+      return res.status(403).json({ error: 'Forbidden: Missing permission to create office locations.' });
+    }
+
     const { id, code, name, address, latitude, longitude, allowedRadiusMeters, status, skipSupabaseSync } = req.body || {};
     const lat = Number(latitude);
     const lng = Number(longitude);
@@ -377,13 +433,26 @@ export function createAppServer() {
         { onConflict: 'id' }
       );
       if (error) {
-        return res.status(400).json({ error: error.message });
+        return res.status(400).json({ error: sanitizeDatabaseError(error.message) });
       }
     }
+    emitErpTableEvent({ table: 'office_locations', eventType: 'INSERT', newRow: loc });
     return res.status(201).json({ location: loc });
   });
 
   app.put('/api/office-locations/:id', async (req, res) => {
+    const caller = await resolveRequestUser(req);
+    if (!caller) {
+      return res.status(401).json({ error: 'Authentication required.' });
+    }
+    const canEdit =
+      caller.role === 'Super Admin' ||
+      hasPageAction(caller, 'basic-data-warehouses', 'edit') ||
+      hasPageAction(caller, 'payroll', 'edit');
+    if (!canEdit) {
+      return res.status(403).json({ error: 'Forbidden: Missing permission to update office locations.' });
+    }
+
     const locId = String(req.params.id);
     const existing = officeLocationsStore.get(locId);
     const body = req.body || {};
@@ -428,28 +497,46 @@ export function createAppServer() {
         { onConflict: 'id' }
       );
       if (error) {
-        return res.status(400).json({ error: error.message });
+        return res.status(400).json({ error: sanitizeDatabaseError(error.message) });
       }
     }
+    emitErpTableEvent({ table: 'office_locations', eventType: 'UPDATE', newRow: updated });
     return res.json({ location: updated });
   });
 
   app.delete('/api/office-locations/:id', async (req, res) => {
+    const caller = await resolveRequestUser(req);
+    if (!caller) {
+      return res.status(401).json({ error: 'Authentication required.' });
+    }
+    const canDelete =
+      caller.role === 'Super Admin' ||
+      hasPageAction(caller, 'basic-data-warehouses', 'delete') ||
+      hasPageAction(caller, 'payroll', 'edit');
+    if (!canDelete) {
+      return res.status(403).json({ error: 'Forbidden: Missing permission to delete office locations.' });
+    }
+
     const locId = String(req.params.id);
     officeLocationsStore.delete(locId);
     if (getDb() && req.query.skipSupabaseSync !== '1') {
       const { error } = await getDb().from('office_locations').delete().eq('id', locId);
       if (error) {
-        return res.status(400).json({ error: error.message });
+        return res.status(400).json({ error: sanitizeDatabaseError(error.message) });
       }
     }
+    emitErpTableEvent({ table: 'office_locations', eventType: 'DELETE', oldRow: { id: locId } });
     res.json({ deleted: true, id: locId });
   });
 
   // --------------------------------------------------------------------------
-  // Dry-Run GPS Distance Validation Endpoint
+  // Dry-Run GPS Distance Validation Endpoint (Authenticated)
   // --------------------------------------------------------------------------
   app.post('/api/attendance/validate', async (req, res) => {
+    const caller = await resolveRequestUser(req);
+    if (!caller) {
+      return res.status(401).json({ error: 'Authentication required.' });
+    }
     const body = req.body || {};
     const office = await resolveOfficeForEmployee(body);
     const result = evaluateGeofenceAttendance({
@@ -897,14 +984,37 @@ export function createAppServer() {
     });
   });
 
-  app.get('/api/attendance/records', (_req, res) => {
+  app.get('/api/attendance/records', async (req, res) => {
+    const caller = await resolveRequestUser(req);
+    if (!caller) {
+      return res.status(401).json({ error: 'Authentication required.' });
+    }
+    const canView =
+      caller.role === 'Super Admin' ||
+      hasPageAction(caller, 'payroll', 'view') ||
+      hasPageAction(caller, 'mobile-field', 'view') ||
+      hasPageAction(caller, 'field-tracker', 'view');
+    if (!canView) {
+      return res.status(403).json({ error: 'Forbidden: Attendance view permission required.' });
+    }
     res.json({
       records: Array.from(attendanceRecordsStore.values()),
       rejectedAttempts: rejectedAttemptsStore,
     });
   });
 
-  app.post('/api/attendance/sync', (req, res) => {
+  app.post('/api/attendance/sync', async (req, res) => {
+    const caller = await resolveRequestUser(req);
+    if (!caller) {
+      return res.status(401).json({ error: 'Authentication required.' });
+    }
+    const canSync =
+      caller.role === 'Super Admin' ||
+      hasPageAction(caller, 'payroll', 'create') ||
+      hasPageAction(caller, 'payroll', 'edit');
+    if (!canSync) {
+      return res.status(403).json({ error: 'Forbidden: Attendance write permission required.' });
+    }
     const records = Array.isArray(req.body?.records) ? req.body.records : [];
     for (const r of records) {
       if (r && r.employeeId && r.date) {
@@ -915,14 +1025,8 @@ export function createAppServer() {
   });
 
   // ============================================================================
-  // ERP AUTH SESSION, EMPLOYEE RESOLUTION & MANUFACTURING / MOBILE APIs
+  // ERP AUTHENTICATION, EMPLOYEE RESOLUTION & AUTHORIZED DOMAIN GATEWAYS
   // ============================================================================
-  const ERP_SESSION_SECRET = getServerDbConfig().sessionSecret;
-  const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
-  const erpActiveSessions = new Map<string, { user: any; createdAt: number; expiresAt: number }>();
-  const revokedSessionTokens = new Set<string>();
-
-  const mfgUsersCache = new Map<string, any>();
   const fieldForceRepsCache = new Map<string, FieldForceRep>();
   const mfgOrdersCache = new Map<string, any>();
   const mfgIssuesCache = new Map<string, any>();
@@ -941,84 +1045,9 @@ export function createAppServer() {
     crmLeads: [] as any[],
   };
 
-  const signErpSessionToken = (user: any): string => {
-    const payload = {
-      uid: String(user.id),
-      code: String(user.userId || ''),
-      email: String(user.email || ''),
-      iat: Date.now(),
-      exp: Date.now() + SESSION_TTL_MS,
-      nonce: crypto.randomBytes(8).toString('hex'),
-    };
-    const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
-    const sig = crypto.createHmac('sha256', ERP_SESSION_SECRET).update(encoded).digest('base64url');
-    return `${encoded}.${sig}`;
-  };
-
-  const verifyErpSessionToken = (token?: string | null): { uid: string; code: string; email: string; exp: number } | null => {
-    if (!token || revokedSessionTokens.has(token)) return null;
-    const parts = token.split('.');
-    if (parts.length !== 2) return null;
-    const [encoded, sig] = parts;
-    const expectedSig = crypto.createHmac('sha256', ERP_SESSION_SECRET).update(encoded).digest('base64url');
-    try {
-      const a = Buffer.from(sig);
-      const b = Buffer.from(expectedSig);
-      if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
-      const parsed = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
-      if (!parsed || !parsed.uid || (parsed.exp && Date.now() > Number(parsed.exp))) {
-        return null;
-      }
-      return parsed;
-    } catch {
-      return null;
-    }
-  };
-
-  const indexUserInMfgCache = (u: any) => {
-    if (!u || typeof u !== 'object') return;
-    if (u.id) mfgUsersCache.set(String(u.id).toLowerCase(), u);
-    if (u.userId) mfgUsersCache.set(String(u.userId).toLowerCase(), u);
-    if (u.uid) mfgUsersCache.set(String(u.uid).toLowerCase(), u);
-    if (u.salesmanCode) mfgUsersCache.set(String(u.salesmanCode).toLowerCase(), u);
-    if (u.email) mfgUsersCache.set(String(u.email).toLowerCase(), u);
-  };
-
   const indexFieldForceRepInCache = (rep: any) => {
     if (!rep || typeof rep !== 'object' || !rep.id) return;
     fieldForceRepsCache.set(String(rep.id), rep as FieldForceRep);
-  };
-
-  const mapSupabaseUserRow = (row: any) => {
-    let parsedPermissions = row.permissions;
-    if (typeof parsedPermissions === 'string') {
-      try {
-        parsedPermissions = JSON.parse(parsedPermissions);
-      } catch {
-        parsedPermissions = null;
-      }
-    }
-    return {
-      id: row.uid ? String(row.uid) : `u-sb-${row.id}`,
-      userId:
-        row.user_id ||
-        row.uid ||
-        (row.email ? String(row.email).split('@')[0].toUpperCase() : `EMP-${row.id}`),
-      name: row.name || 'Staff User',
-      email: row.email || '',
-      phone: row.phone || '',
-      role: row.role || 'Field Force',
-      designation: row.designation || '',
-      department: row.department || '',
-      region: row.region || '',
-      area: row.area || '',
-      territory: row.territory || '',
-      isSalesman: row.is_salesman,
-      salesmanCode: row.salesman_code || row.salesmancode || undefined,
-      monthlySalesTargetBDT: row.monthly_target_bdt || row.monthlysalestargetbdt,
-      status: row.status || 'Active',
-      permissions: parsedPermissions || {},
-    };
   };
 
   const mapSupabaseFieldForceRow = (row: any): FieldForceRep => ({
@@ -1063,116 +1092,6 @@ export function createAppServer() {
     status: row.is_active === false ? 'Inactive' : 'Active',
   });
 
-  const lookupAuthoritativeUser = async (
-    hdrId: string,
-    hdrCode: string,
-    hdrEmail: string
-  ): Promise<any | null> => {
-    // 1. Prefer authoritative Supabase users table when available
-    if (getDb()) {
-      try {
-        if (hdrEmail) {
-          const { data } = await getDb()
-            .from('users')
-            .select('*')
-            .ilike('email', hdrEmail)
-            .limit(1)
-            .maybeSingle();
-          if (data) {
-            const mapped = mapSupabaseUserRow(data);
-            indexUserInMfgCache(mapped);
-            return mapped;
-          }
-        }
-        const lookupUid = hdrCode || hdrId;
-        if (lookupUid) {
-          const { data } = await getDb()
-            .from('users')
-            .select('*')
-            .eq('uid', lookupUid)
-            .limit(1)
-            .maybeSingle();
-          if (data) {
-            const mapped = mapSupabaseUserRow(data);
-            indexUserInMfgCache(mapped);
-            return mapped;
-          }
-        }
-        if (/^u-sb-(\d+)$/i.test(hdrId)) {
-          const numId = Number(hdrId.replace(/^u-sb-/i, ''));
-          const { data } = await getDb()
-            .from('users')
-            .select('*')
-            .eq('id', numId)
-            .limit(1)
-            .maybeSingle();
-          if (data) {
-            const mapped = mapSupabaseUserRow(data);
-            indexUserInMfgCache(mapped);
-            return mapped;
-          }
-        }
-      } catch {
-        // Fall back to server in-memory store below
-      }
-    }
-
-    // 2. Fallback to synchronized server user cache
-    const candidates = [hdrId, hdrCode, hdrEmail]
-      .map((s) => s.toLowerCase())
-      .filter(Boolean);
-    for (const key of candidates) {
-      const hit = mfgUsersCache.get(key);
-      if (hit) return hit;
-    }
-
-    return null;
-  };
-
-  const resolveRequestUser = async (req: express.Request): Promise<any | null> => {
-    const authHeader = String(req.headers['authorization'] || '').trim();
-    const bearerToken = authHeader.toLowerCase().startsWith('bearer ')
-      ? authHeader.slice(7).trim()
-      : '';
-    const sessionToken = String(req.headers['x-erp-session-token'] || bearerToken || '').trim();
-
-    if (sessionToken) {
-      if (revokedSessionTokens.has(sessionToken)) {
-        return null;
-      }
-      const tokenClaims = verifyErpSessionToken(sessionToken);
-      if (!tokenClaims) {
-        return null;
-      }
-      const storedSession = erpActiveSessions.get(sessionToken);
-      if (storedSession && Date.now() > storedSession.expiresAt) {
-        erpActiveSessions.delete(sessionToken);
-        return null;
-      }
-      const freshUser =
-        (await lookupAuthoritativeUser(tokenClaims.uid, tokenClaims.code, tokenClaims.email)) ||
-        storedSession?.user;
-      if (!freshUser || freshUser.status === 'Blocked' || freshUser.status === 'Inactive') {
-        return null;
-      }
-      return freshUser;
-    }
-
-    const hdrId = String(req.headers['x-user-id'] || req.query.userId || '').trim();
-    const hdrCode = String(req.headers['x-user-code'] || '').trim();
-    const hdrEmail = String(req.headers['x-user-email'] || req.query.userEmail || '').trim();
-
-    if (!hdrId && !hdrCode && !hdrEmail) {
-      return null;
-    }
-
-    const resolved = await lookupAuthoritativeUser(hdrId, hdrCode, hdrEmail);
-    if (!resolved || resolved.status === 'Blocked' || resolved.status === 'Inactive') {
-      return null;
-    }
-    return resolved;
-  };
-
   const resolveEmployeeProfileForCaller = async (
     caller: any
   ): Promise<ResolvedMobileEmployeeProfile | null> => {
@@ -1189,7 +1108,6 @@ export function createAppServer() {
           for (const row of data) {
             const mapped = mapSupabaseFieldForceRow(row);
             const cached = mergedMap.get(mapped.id);
-            // Prefer cached richer client fields (like unsynced userId if column not yet migrated)
             mergedMap.set(mapped.id, {
               ...mapped,
               ...(cached?.userId && !mapped.userId ? { userId: cached.userId } : {}),
@@ -1208,61 +1126,61 @@ export function createAppServer() {
     );
   };
 
-  const handleSyncContext = (req: express.Request, res: express.Response) => {
-    const body = req.body || {};
-    if (Array.isArray(body.users)) {
-      for (const u of body.users) {
-        indexUserInMfgCache(u);
-      }
+  const handleSyncContext = async (req: express.Request, res: express.Response) => {
+    const caller = await resolveRequestUser(req);
+    if (!caller) {
+      return res.status(401).json({ ok: false, error: 'Authentication required.' });
     }
-    if (Array.isArray(body.fieldForceReps)) {
+    const body = req.body || {};
+    // Only operational read caches (never users/passwords) may be hydrated when authenticated
+    if (Array.isArray(body.fieldForceReps) && (caller.role === 'Super Admin' || hasPageAction(caller, 'basic-data-field-force', 'view') || hasPageAction(caller, 'mobile-field', 'view'))) {
       for (const rep of body.fieldForceReps) {
         indexFieldForceRepInCache(rep);
       }
     }
-    if (Array.isArray(body.productionOrders)) {
+    if (Array.isArray(body.productionOrders) && (caller.role === 'Super Admin' || hasPageAction(caller, 'manufacturing', 'view'))) {
       for (const po of body.productionOrders) {
         if (po && (po.id || po.orderNumber)) {
           mfgOrdersCache.set(String(po.id || po.orderNumber), po);
         }
       }
     }
-    if (Array.isArray(body.materialIssues)) {
+    if (Array.isArray(body.materialIssues) && (caller.role === 'Super Admin' || hasPageAction(caller, 'manufacturing', 'view'))) {
       for (const mi of body.materialIssues) {
         if (mi && (mi.id || mi.productionOrderId)) {
           mfgIssuesCache.set(String(mi.id || mi.productionOrderId), mi);
         }
       }
     }
-    if (Array.isArray(body.rawMaterials)) {
+    if (Array.isArray(body.rawMaterials) && (caller.role === 'Super Admin' || hasPageAction(caller, 'raw-material-inventory', 'view') || hasPageAction(caller, 'manufacturing', 'view'))) {
       for (const rm of body.rawMaterials) {
         if (rm && (rm.id || rm.code)) {
           mfgRawMaterialsCache.set(String(rm.id || rm.code), rm);
         }
       }
     }
-    if (Array.isArray(body.inventoryBatches)) {
+    if (Array.isArray(body.inventoryBatches) && (caller.role === 'Super Admin' || hasPageAction(caller, 'raw-material-inventory', 'view') || hasPageAction(caller, 'manufacturing', 'view'))) {
       for (const b of body.inventoryBatches) {
         if (b && (b.id || b.batchNumber)) {
           mfgBatchesCache.set(String(b.id || b.batchNumber), b);
         }
       }
     }
-    if (Array.isArray(body.overtimeRequests)) {
+    if (Array.isArray(body.overtimeRequests) && (caller.role === 'Super Admin' || hasPageAction(caller, 'overtime-management', 'view'))) {
       for (const reqItem of body.overtimeRequests) {
         if (reqItem && (reqItem.id || reqItem.requestNumber)) {
           overtimeRequestsCache.set(String(reqItem.id || reqItem.requestNumber), reqItem);
         }
       }
     }
-    if (Array.isArray(body.overtimeAttendances)) {
+    if (Array.isArray(body.overtimeAttendances) && (caller.role === 'Super Admin' || hasPageAction(caller, 'overtime-management', 'view'))) {
       for (const att of body.overtimeAttendances) {
         if (att && att.id) {
           overtimeAttendancesCache.set(String(att.id), att);
         }
       }
     }
-    if (Array.isArray(body.overtimePolicies)) {
+    if (Array.isArray(body.overtimePolicies) && (caller.role === 'Super Admin' || hasPageAction(caller, 'overtime-management', 'view'))) {
       for (const pol of body.overtimePolicies) {
         if (pol && pol.id) {
           overtimePoliciesCache.set(String(pol.id), pol);
@@ -1275,88 +1193,200 @@ export function createAppServer() {
   app.post('/api/manufacturing/sync-state', handleSyncContext);
   app.post('/api/erp/sync-context', handleSyncContext);
 
-  app.post('/api/auth/session', async (req, res) => {
+  // Authoritative Backend Login (bcrypt + controlled plaintext->bcrypt migration + HttpOnly cookie)
+  app.post('/api/auth/login', async (req, res) => {
     const body = req.body || {};
-    const suppliedUser = body.user;
-    if (!suppliedUser || !suppliedUser.id || suppliedUser.id === 'guest') {
+    const identifier = String(body.identifier || body.userId || body.email || '').trim();
+    const password = String(body.password || '');
+
+    if (!identifier) {
+      return res.status(400).json({
+        authenticated: false,
+        code: 'MISSING_IDENTIFIER',
+        error: 'Please enter your User ID or Email.',
+      });
+    }
+    if (!password) {
+      return res.status(400).json({
+        authenticated: false,
+        code: 'MISSING_PASSWORD',
+        error: 'Please enter your Password.',
+      });
+    }
+
+    const found = await findRawUserRecordByIdentifier(identifier);
+    if (!found.user) {
       return res.status(401).json({
         authenticated: false,
-        error: 'Valid authenticated ERP user is required to establish a session.',
+        code: 'INVALID_CREDENTIALS',
+        error: 'Access Denied: Invalid User ID or Email. No registered account found.',
       });
     }
 
-    // Index supplied user snapshot into server cache, then verify against authoritative record if available
-    const sanitizedUser = {
-      ...suppliedUser,
-      password: '',
-    };
-    const dbUser = await lookupAuthoritativeUser(
-      String(suppliedUser.id || ''),
-      String(suppliedUser.userId || suppliedUser.salesmanCode || ''),
-      String(suppliedUser.email || '')
-    );
-
-    const authoritativeUser = dbUser
-      ? {
-          ...sanitizedUser,
-          ...dbUser,
-          password: '',
-        }
-      : sanitizedUser;
-
-    if (
-      suppliedUser.status === 'Blocked' ||
-      suppliedUser.status === 'Inactive' ||
-      authoritativeUser.status === 'Blocked' ||
-      authoritativeUser.status === 'Inactive'
-    ) {
+    if (found.user.status === 'Blocked' || found.user.status === 'Inactive') {
       return res.status(403).json({
         authenticated: false,
-        error: `Account is currently ${
-          suppliedUser.status === 'Blocked' || suppliedUser.status === 'Inactive'
-            ? suppliedUser.status
-            : authoritativeUser.status
-        }.`,
+        code: 'ACCOUNT_INACTIVE',
+        error: `Access Denied: This account is currently marked as ${found.user.status}. Contact your Administrator.`,
       });
     }
 
-    indexUserInMfgCache(authoritativeUser);
-    if (Array.isArray(body.fieldForceReps)) {
-      for (const rep of body.fieldForceReps) {
-        indexFieldForceRepInCache(rep);
-      }
-    }
-    if (Array.isArray(body.officeLocations)) {
-      for (const loc of body.officeLocations) {
-        if (loc && loc.id && loc.name) {
-          officeLocationsStore.set(String(loc.id), {
-            id: String(loc.id),
-            code: loc.code,
-            name: String(loc.name),
-            address: String(loc.address || ''),
-            latitude: Number(loc.latitude),
-            longitude: Number(loc.longitude),
-            allowedRadiusMeters: Number(loc.allowedRadiusMeters) || DEFAULT_ALLOWED_RADIUS_METERS,
-            status: loc.status === 'Inactive' ? 'Inactive' : 'Active',
-          });
-        }
-      }
-    }
-    const token = signErpSessionToken(authoritativeUser);
-    const now = Date.now();
-    erpActiveSessions.set(token, {
-      user: authoritativeUser,
-      createdAt: now,
-      expiresAt: now + SESSION_TTL_MS,
+    const verification = await verifyPasswordAndMigrateHash({
+      inputPassword: password,
+      storedPassword: found.storedPassword,
+      rawRow: found.rawRow,
+      user: found.user,
     });
 
-    const employee = await resolveEmployeeProfileForCaller(authoritativeUser);
+    if (!verification.valid) {
+      recordDbAuditEvent({
+        eventType: 'AUTH_LOGIN_FAILED',
+        actorId: found.user.id,
+        actorName: found.user.name,
+        actorRole: found.user.role,
+        outcome: 'error',
+        details: `Failed login attempt for account ${found.user.userId}.`,
+      });
+      return res.status(401).json({
+        authenticated: false,
+        code: 'INVALID_PASSWORD',
+        error: 'Access Denied: Incorrect password. Please try again.',
+      });
+    }
+
+    // Rotate any existing session token to prevent session fixation
+    const previousToken = extractSessionToken(req);
+    const { token, expiresAt } = createSessionForUser(found.user, previousToken || null);
+    setSessionCookie(res, req, token);
+    indexUserInAuthCache(found.user);
+
+    const employee = await resolveEmployeeProfileForCaller(found.user);
+    recordDbAuditEvent({
+      eventType: 'AUTH_LOGIN_SUCCESS',
+      actorId: found.user.id,
+      actorName: found.user.name,
+      actorRole: found.user.role,
+      outcome: 'success',
+      details: `Authenticated session established for ${found.user.userId}.`,
+    });
+
     return res.status(200).json({
       authenticated: true,
-      token,
-      user: authoritativeUser,
+      user: sanitizeUserForClient(found.user),
       employee,
+      expiresAt,
     });
+  });
+
+  // Legacy client-supplied snapshot endpoint permanently disabled
+  app.post('/api/auth/session', (_req, res) => {
+    return res.status(410).json({
+      authenticated: false,
+      code: 'SNAPSHOT_SESSION_DISABLED',
+      error: 'Client-supplied session snapshots are disabled. Please sign in via POST /api/auth/login.',
+    });
+  });
+
+  app.post('/api/auth/change-password', async (req, res) => {
+    const caller = await resolveRequestUser(req);
+    if (!caller) {
+      return res.status(401).json({ success: false, error: 'Authentication required.' });
+    }
+    const currentPassword = req.body?.currentPassword ? String(req.body.currentPassword) : '';
+    const newPassword = String(req.body?.newPassword || '').trim();
+    if (!newPassword || newPassword.length < 4) {
+      return res.status(400).json({ success: false, error: 'New password must be at least 4 characters long.' });
+    }
+
+    const found = await findRawUserRecordByIdentifier(caller.userId || caller.email || caller.id);
+    if (found.user && currentPassword) {
+      const check = await verifyPasswordAndMigrateHash({
+        inputPassword: currentPassword,
+        storedPassword: found.storedPassword,
+        rawRow: found.rawRow,
+        user: found.user,
+      });
+      if (!check.valid) {
+        return res.status(403).json({ success: false, error: 'Current password is incorrect.' });
+      }
+    }
+
+    const newHash = await hashPassword(newPassword);
+    indexUserInAuthCache(caller, newHash);
+    if (getDb() && found.rawRow) {
+      const { error } = await getDb()
+        .from('users')
+        .update({ password: newHash, updated_at: new Date().toISOString() })
+        .eq('id', found.rawRow.id);
+      if (error) {
+        return res.status(400).json({ success: false, error: sanitizeDatabaseError(error.message) });
+      }
+    }
+    return res.status(200).json({ success: true });
+  });
+
+  app.post('/api/auth/reset-password', async (req, res) => {
+    const caller = await resolveRequestUser(req);
+    const identifier = String(req.body?.identifier || '').trim();
+    const currentPassword = String(req.body?.currentPassword || '');
+    const newPassword = String(req.body?.newPassword || '').trim();
+
+    if (!identifier || !newPassword || newPassword.length < 4) {
+      return res.status(400).json({
+        success: false,
+        error: 'Valid User ID/Email and a new password (min 4 characters) are required.',
+      });
+    }
+
+    const found = await findRawUserRecordByIdentifier(identifier);
+    if (!found.user) {
+      return res.status(404).json({
+        success: false,
+        error: `Account "${identifier}" not found.`,
+      });
+    }
+
+    const isAdminReset =
+      caller &&
+      (caller.role === 'Super Admin' ||
+        hasPageAction(caller, 'users-permissions', 'reset_password') ||
+        hasPageAction(caller, 'users-permissions', 'edit'));
+
+    if (!isAdminReset) {
+      if (!currentPassword) {
+        return res.status(403).json({
+          success: false,
+          code: 'PASSWORD_RESET_AUTHORIZATION_REQUIRED',
+          error:
+            'Self-service password change requires your Current Password, or ask your System Administrator to reset it in User Management.',
+        });
+      }
+      const verified = await verifyPasswordAndMigrateHash({
+        inputPassword: currentPassword,
+        storedPassword: found.storedPassword,
+        rawRow: found.rawRow,
+        user: found.user,
+      });
+      if (!verified.valid) {
+        return res.status(403).json({
+          success: false,
+          error: 'Current password verification failed.',
+        });
+      }
+    }
+
+    const newHash = await hashPassword(newPassword);
+    indexUserInAuthCache(found.user, newHash);
+    if (getDb() && found.rawRow) {
+      const { error } = await getDb()
+        .from('users')
+        .update({ password: newHash, updated_at: new Date().toISOString() })
+        .eq('id', found.rawRow.id);
+      if (error) {
+        return res.status(400).json({ success: false, error: sanitizeDatabaseError(error.message) });
+      }
+    }
+    return res.status(200).json({ success: true });
   });
 
   app.get('/api/auth/me', async (req, res) => {
@@ -1370,21 +1400,17 @@ export function createAppServer() {
     const employee = await resolveEmployeeProfileForCaller(caller);
     return res.status(200).json({
       authenticated: true,
-      user: { ...caller, password: '' },
+      user: sanitizeUserForClient(caller),
       employee,
     });
   });
 
   app.post('/api/auth/logout', (req, res) => {
-    const authHeader = String(req.headers['authorization'] || '').trim();
-    const bearerToken = authHeader.toLowerCase().startsWith('bearer ')
-      ? authHeader.slice(7).trim()
-      : '';
-    const token = String(req.headers['x-erp-session-token'] || bearerToken || req.body?.token || '').trim();
+    const token = extractSessionToken(req) || String(req.body?.token || '').trim();
     if (token) {
-      erpActiveSessions.delete(token);
-      revokedSessionTokens.add(token);
+      revokeSessionToken(token);
     }
+    clearSessionCookie(res, req);
     res.json({ ok: true, loggedOut: true });
   });
 
@@ -1422,12 +1448,21 @@ export function createAppServer() {
 
   app.get('/api/manufacturing/permissions', async (req, res) => {
     const caller = await resolveRequestUser(req);
+    if (!caller) {
+      return res.status(401).json({ authenticated: false, error: 'Authentication required.' });
+    }
     const permissions = resolveManufacturingCostPermissions(caller);
-    res.json({ authenticated: Boolean(caller), permissions });
+    res.json({ authenticated: true, permissions });
   });
 
   app.get('/api/manufacturing/production-orders', async (req, res) => {
     const caller = await resolveRequestUser(req);
+    if (!caller) {
+      return res.status(401).json({ error: 'Authentication required.' });
+    }
+    if (caller.role !== 'Super Admin' && !hasPageAction(caller, 'manufacturing', 'view')) {
+      return res.status(403).json({ error: 'Forbidden: Manufacturing view permission required.' });
+    }
     const permissions = resolveManufacturingCostPermissions(caller);
 
     let orders: any[] = Array.from(mfgOrdersCache.values());
@@ -1472,6 +1507,9 @@ export function createAppServer() {
 
   app.get('/api/manufacturing/cost-sheet/:orderId', async (req, res) => {
     const caller = await resolveRequestUser(req);
+    if (!caller) {
+      return res.status(401).json({ allowed: false, code: 'UNAUTHORIZED', error: 'Authentication required.' });
+    }
     const auth = authorizeCostSheetForUser(caller);
     if (!auth.allowed) {
       return res.status(403).json({
@@ -1542,6 +1580,16 @@ export function createAppServer() {
 
   app.get('/api/manufacturing/material-issue-context/:orderId', async (req, res) => {
     const caller = await resolveRequestUser(req);
+    if (!caller) {
+      return res.status(401).json({ error: 'Authentication required.' });
+    }
+    const canView =
+      caller.role === 'Super Admin' ||
+      hasPageAction(caller, 'manufacturing', 'view') ||
+      hasPageAction(caller, 'manufacturing', 'issue_materials');
+    if (!canView) {
+      return res.status(403).json({ error: 'Forbidden: Manufacturing material issue view permission required.' });
+    }
     const rawOrderId = String(req.params.orderId || '').trim();
     const targetLower = rawOrderId.toLowerCase();
 
@@ -1631,6 +1679,13 @@ export function createAppServer() {
 
   app.post('/api/manufacturing/material-issues', async (req, res) => {
     const caller = await resolveRequestUser(req);
+    if (!caller) {
+      return res.status(401).json({ success: false, error: 'Authentication required.' });
+    }
+    if (caller.role !== 'Super Admin' && !hasPageAction(caller, 'manufacturing', 'issue_materials')) {
+      return res.status(403).json({ success: false, error: 'Forbidden: Issue Raw Materials permission required.' });
+    }
+
     const body = req.body || {};
     const items = Array.isArray(body.items) ? body.items : [];
     const batches = Array.from(mfgBatchesCache.values());
@@ -2202,59 +2257,26 @@ export function createAppServer() {
   });
 
   // --------------------------------------------------------------------------
+  // Register Centralized Domain DB Gateway (58 tables) & Real-time SSE Events
+  // --------------------------------------------------------------------------
+  registerEventsRoutes(app);
+  registerErpGatewayRoutes(app);
+
+  // --------------------------------------------------------------------------
   // Super Admin Database Status, Schema Verification & Audit Endpoints (Phase 1)
-  // Strictly requires a verified signed session token for an Active Super Admin.
-  // Never exposes Supabase URLs, API keys, service role secrets, or raw URIs.
+  // Strictly requires a verified signed session (HttpOnly cookie or Bearer token)
+  // for an Active Super Admin. Never exposes URLs, API keys, or secrets.
   // --------------------------------------------------------------------------
   const requireSuperAdminSession = async (
     req: express.Request,
     res: express.Response
   ): Promise<any | null> => {
-    const authHeader = String(req.headers['authorization'] || '').trim();
-    const bearerToken = authHeader.toLowerCase().startsWith('bearer ')
-      ? authHeader.slice(7).trim()
-      : '';
-    const sessionToken = String(req.headers['x-erp-session-token'] || bearerToken || '').trim();
-
-    if (!sessionToken || revokedSessionTokens.has(sessionToken)) {
+    const caller = await resolveRequestUser(req);
+    if (!caller) {
       res.status(401).json({
         ok: false,
         code: 'ADMIN_DB_UNAUTHENTICATED',
-        error: 'Valid signed ERP session token is required.',
-      });
-      return null;
-    }
-
-    const tokenClaims = verifyErpSessionToken(sessionToken);
-    if (!tokenClaims) {
-      res.status(401).json({
-        ok: false,
-        code: 'ADMIN_DB_SESSION_INVALID',
-        error: 'Session token is invalid or expired.',
-      });
-      return null;
-    }
-
-    const storedSession = erpActiveSessions.get(sessionToken);
-    if (storedSession && Date.now() > storedSession.expiresAt) {
-      erpActiveSessions.delete(sessionToken);
-      res.status(401).json({
-        ok: false,
-        code: 'ADMIN_DB_SESSION_EXPIRED',
-        error: 'Session has expired. Please sign in again.',
-      });
-      return null;
-    }
-
-    const caller =
-      (await lookupAuthoritativeUser(tokenClaims.uid, tokenClaims.code, tokenClaims.email)) ||
-      storedSession?.user;
-
-    if (!caller || caller.status === 'Blocked' || caller.status === 'Inactive') {
-      res.status(401).json({
-        ok: false,
-        code: 'ADMIN_DB_ACCOUNT_INACTIVE',
-        error: 'Authenticated account is inactive or blocked.',
+        error: 'Valid signed ERP session is required.',
       });
       return null;
     }

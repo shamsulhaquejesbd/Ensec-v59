@@ -25,7 +25,6 @@ import { useERP } from '../../context/ERPContext.tsx';
 import { ProductCategory } from '../../types/erp.ts';
 
 import { INITIAL_CATEGORIES } from '../../mock/initialData.ts';
-import { getSupabaseUrl } from '../../lib/supabase.ts';
 
 export const ProductCategoriesPage: React.FC = () => {
   const {
@@ -221,9 +220,6 @@ CREATE POLICY "Allow public delete access" ON public.product_categories FOR DELE
     setTimeout(() => setCopiedSchema(false), 3000);
   };
 
-  const currentActiveUrl = getSupabaseUrl();
-  const currentHost = currentActiveUrl.replace(/^https?:\/\//, '').split('/')[0];
-
   return (
     <div className="space-y-6">
       {/* Toast Notification */}
@@ -357,7 +353,7 @@ CREATE POLICY "Allow public delete access" ON public.product_categories FOR DELE
               </h3>
               <p className="text-xs text-slate-500 max-w-md mx-auto mt-1 leading-relaxed">
                 {categories.length === 0
-                  ? `Your connected database (${currentHost}) currently has 0 rows in the product_categories table. You can create your own categories or seed the standard Ensec categories.`
+                  ? 'Your centralized ERP database currently has 0 rows in the product_categories table. You can create your own categories or seed the standard Ensec categories.'
                   : `No categories match the search query "${categorySearch}".`}
               </p>
             </div>

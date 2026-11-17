@@ -200,11 +200,11 @@ export const UserManagementModule: React.FC = () => {
     setSelectedUserForEdit(null);
   };
 
-  // Open Password Editor Modal
+  // Open Password Editor Modal (never prefill or expose existing password/hash)
   const openPasswordEditor = (user: User) => {
     setSelectedUserForPasswordEdit(user);
-    setPasswordInput(user.password || '');
-    setConfirmPasswordInput(user.password || '');
+    setPasswordInput('');
+    setConfirmPasswordInput('');
     setShowPasswordToggle(false);
     setPasswordFeedback(null);
   };
@@ -1108,10 +1108,10 @@ export const UserManagementModule: React.FC = () => {
                   />
                 </div>
                 <div>
-                  <label className="font-semibold text-blue-900 dark:text-blue-300 block mb-1">Account Password</label>
+                  <label className="font-semibold text-blue-900 dark:text-blue-300 block mb-1">Reset Password (Optional)</label>
                   <input
-                    type="text"
-                    placeholder="e.g. ensec2026"
+                    type="password"
+                    placeholder="Leave blank to keep current password"
                     value={selectedUserForEdit.password || ''}
                     onChange={(e) => setSelectedUserForEdit({ ...selectedUserForEdit, password: e.target.value })}
                     className="w-full p-2 rounded-xl border border-blue-200 dark:border-blue-800 bg-white dark:bg-slate-800 text-slate-900 dark:text-white font-mono text-xs"
@@ -1233,11 +1233,11 @@ export const UserManagementModule: React.FC = () => {
               </span>
             </div>
 
-            {/* Current Password Info Banner */}
+            {/* Security Info Banner (passwords are bcrypt-hashed and never exposed) */}
             <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-amber-50/70 dark:bg-amber-950/30 border border-amber-200/60 dark:border-amber-900/40 text-[11px]">
-              <span className="text-amber-800 dark:text-amber-300 font-medium">Current saved password:</span>
+              <span className="text-amber-800 dark:text-amber-300 font-medium">Credential Storage:</span>
               <span className="font-mono font-bold text-amber-900 dark:text-amber-200 bg-white/80 dark:bg-slate-800 px-2 py-0.5 rounded border border-amber-200 dark:border-amber-800">
-                {selectedUserForPasswordEdit.password || 'ensec2026'}
+                Bcrypt Protected (Hidden)
               </span>
             </div>
 

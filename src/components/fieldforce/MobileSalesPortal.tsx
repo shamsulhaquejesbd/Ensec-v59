@@ -211,6 +211,7 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
     const verifySessionWithRetry = async (attempt = 0) => {
       try {
         const res = await fetch('/api/mobile-field/me', {
+          credentials: 'include',
           headers: {
             ...getErpAuthHeaders(),
             'x-mobile-portal': 'true',
@@ -844,6 +845,7 @@ export const MobileSalesPortal: React.FC<MobileSalesPortalProps> = ({
       try {
         const res = await fetch(endpoint, {
           method: 'POST',
+          credentials: 'include',
           headers: {
             ...getErpAuthHeaders(),
             'x-mobile-portal': 'true',
