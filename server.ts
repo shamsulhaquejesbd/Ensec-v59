@@ -4,7 +4,15 @@ import http from 'http';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
-import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import {
+  getServerSupabase,
+  getServerDbConfig,
+  getPublicSafeDatabaseSummary,
+  checkServerDatabaseStatus,
+  verifyDatabaseSchema,
+  getDbAuditEvents,
+  recordDbAuditEvent,
+} from './server/db/index.ts';
 import {
   DEFAULT_ALLOWED_RADIUS_METERS,
   DEFAULT_GRACE_PERIOD_MINUTES,
@@ -42,25 +50,8 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Supabase server client (optional, falls back gracefully if tables not yet migrated)
-const SUPABASE_URL =
-  process.env.VITE_SUPABASE_URL ||
-  process.env.SUPABASE_URL ||
-  'https://ykljdwdkgysnekiqqaby.supabase.co';
-const SUPABASE_KEY =
-  process.env.SUPABASE_SERVICE_ROLE_KEY ||
-  process.env.VITE_SUPABASE_ANON_KEY ||
-  process.env.SUPABASE_ANON_KEY ||
-  'sb_publishable_-ij_EEVGDNaAD834Nac1Iw_4nq2Iafr';
-
-let serverSupabase: SupabaseClient | null = null;
-try {
-  if (SUPABASE_URL && SUPABASE_KEY) {
-    serverSupabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-  }
-} catch {
-  serverSupabase = null;
-}
+// Centralized server-side Supabase client accessor (configured strictly via server env vars)
+const getDb = () => getServerSupabase();
 
 // Authoritative server-side stores (hydrated from Supabase if available + synced from client)
 const officeLocationsStore = new Map<string, OfficeLocation>(
@@ -88,9 +79,9 @@ async function resolveOfficeForEmployee(body: any): Promise<ResolvedOfficeConfig
   const officeId = String(body.assignedOfficeId || body.officeId || '').trim();
   let storedOffice = officeId ? officeLocationsStore.get(officeId) : undefined;
 
-  if (!storedOffice && serverSupabase && officeId) {
+  if (!storedOffice && getDb() && officeId) {
     try {
-      const { data } = await serverSupabase
+      const { data } = await getDb()
         .from('office_locations')
         .select('*')
         .eq('id', officeId)
@@ -115,12 +106,12 @@ async function resolveOfficeForEmployee(body: any): Promise<ResolvedOfficeConfig
 
   // 2. Also inspect employee record from Supabase field_force_reps if available
   let dbRepOffice: Partial<ResolvedOfficeConfig> | null = null;
-  if (serverSupabase && body.employeeId) {
+  if (getDb() && body.employeeId) {
     try {
       const empIdNum = Number(body.employeeId);
       const query = !isNaN(empIdNum)
-        ? serverSupabase.from('field_force_reps').select('*').eq('id', empIdNum).maybeSingle()
-        : serverSupabase
+        ? getDb().from('field_force_reps').select('*').eq('id', empIdNum).maybeSingle()
+        : getDb()
             .from('field_force_reps')
             .select('*')
             .eq('code', body.employeeCode || body.employeeId)
@@ -210,9 +201,9 @@ async function persistRejectedAttempt(attempt: RejectedAttendanceAttempt) {
   if (rejectedAttemptsStore.length > 1000) {
     rejectedAttemptsStore.pop();
   }
-  if (serverSupabase) {
+  if (getDb()) {
     try {
-      await serverSupabase.from('attendance_rejected_attempts').insert({
+      await getDb().from('attendance_rejected_attempts').insert({
         id: attempt.id,
         employee_id: attempt.employeeId,
         employee_code: attempt.employeeCode || null,
@@ -244,9 +235,9 @@ async function persistRejectedAttempt(attempt: RejectedAttendanceAttempt) {
 async function persistAcceptedAttendance(record: AttendanceRecord) {
   const key = `${record.employeeId}_${record.date}`;
   attendanceRecordsStore.set(key, record);
-  if (serverSupabase) {
+  if (getDb()) {
     try {
-      await serverSupabase.from('employee_attendances').upsert(
+      await getDb().from('employee_attendances').upsert(
         {
           id: record.id,
           employee_id: record.employeeId || record.fieldForceId || '',
@@ -301,9 +292,9 @@ export function createAppServer() {
   // Office Locations CRUD
   // --------------------------------------------------------------------------
   app.get('/api/office-locations', async (_req, res) => {
-    if (serverSupabase) {
+    if (getDb()) {
       try {
-        const { data, error } = await serverSupabase
+        const { data, error } = await getDb()
           .from('office_locations')
           .select('*')
           .order('created_at', { ascending: true });
@@ -369,8 +360,8 @@ export function createAppServer() {
       updatedAt: nowIso,
     };
     officeLocationsStore.set(loc.id, loc);
-    if (serverSupabase && !skipSupabaseSync) {
-      const { error } = await serverSupabase.from('office_locations').upsert(
+    if (getDb() && !skipSupabaseSync) {
+      const { error } = await getDb().from('office_locations').upsert(
         {
           id: loc.id,
           code: loc.code || null,
@@ -421,8 +412,8 @@ export function createAppServer() {
       updatedAt: new Date().toISOString(),
     };
     officeLocationsStore.set(locId, updated);
-    if (serverSupabase && !body.skipSupabaseSync) {
-      const { error } = await serverSupabase.from('office_locations').upsert(
+    if (getDb() && !body.skipSupabaseSync) {
+      const { error } = await getDb().from('office_locations').upsert(
         {
           id: updated.id,
           code: updated.code || null,
@@ -446,8 +437,8 @@ export function createAppServer() {
   app.delete('/api/office-locations/:id', async (req, res) => {
     const locId = String(req.params.id);
     officeLocationsStore.delete(locId);
-    if (serverSupabase && req.query.skipSupabaseSync !== '1') {
-      const { error } = await serverSupabase.from('office_locations').delete().eq('id', locId);
+    if (getDb() && req.query.skipSupabaseSync !== '1') {
+      const { error } = await getDb().from('office_locations').delete().eq('id', locId);
       if (error) {
         return res.status(400).json({ error: error.message });
       }
@@ -926,9 +917,7 @@ export function createAppServer() {
   // ============================================================================
   // ERP AUTH SESSION, EMPLOYEE RESOLUTION & MANUFACTURING / MOBILE APIs
   // ============================================================================
-  const ERP_SESSION_SECRET =
-    process.env.ERP_SESSION_SECRET ||
-    crypto.createHash('sha256').update(`${SUPABASE_URL}:ensec-erp-session-key`).digest('hex');
+  const ERP_SESSION_SECRET = getServerDbConfig().sessionSecret;
   const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
   const erpActiveSessions = new Map<string, { user: any; createdAt: number; expiresAt: number }>();
   const revokedSessionTokens = new Set<string>();
@@ -1080,10 +1069,10 @@ export function createAppServer() {
     hdrEmail: string
   ): Promise<any | null> => {
     // 1. Prefer authoritative Supabase users table when available
-    if (serverSupabase) {
+    if (getDb()) {
       try {
         if (hdrEmail) {
-          const { data } = await serverSupabase
+          const { data } = await getDb()
             .from('users')
             .select('*')
             .ilike('email', hdrEmail)
@@ -1097,7 +1086,7 @@ export function createAppServer() {
         }
         const lookupUid = hdrCode || hdrId;
         if (lookupUid) {
-          const { data } = await serverSupabase
+          const { data } = await getDb()
             .from('users')
             .select('*')
             .eq('uid', lookupUid)
@@ -1111,7 +1100,7 @@ export function createAppServer() {
         }
         if (/^u-sb-(\d+)$/i.test(hdrId)) {
           const numId = Number(hdrId.replace(/^u-sb-/i, ''));
-          const { data } = await serverSupabase
+          const { data } = await getDb()
             .from('users')
             .select('*')
             .eq('id', numId)
@@ -1190,9 +1179,9 @@ export function createAppServer() {
     if (!caller) return null;
     const mergedMap = new Map<string, FieldForceRep>(fieldForceRepsCache);
 
-    if (serverSupabase) {
+    if (getDb()) {
       try {
-        const { data } = await serverSupabase
+        const { data } = await getDb()
           .from('field_force_reps')
           .select('*')
           .order('id', { ascending: true });
@@ -1442,9 +1431,9 @@ export function createAppServer() {
     const permissions = resolveManufacturingCostPermissions(caller);
 
     let orders: any[] = Array.from(mfgOrdersCache.values());
-    if (serverSupabase) {
+    if (getDb()) {
       try {
-        const { data } = await serverSupabase
+        const { data } = await getDb()
           .from('production_orders')
           .select('*')
           .order('id', { ascending: false });
@@ -1502,9 +1491,9 @@ export function createAppServer() {
         String(po.batchNumber || '').toLowerCase() === targetLower
     );
 
-    if (!order && serverSupabase) {
+    if (!order && getDb()) {
       try {
-        const { data } = await serverSupabase.from('production_orders').select('*');
+        const { data } = await getDb().from('production_orders').select('*');
         if (Array.isArray(data)) {
           const hit = data.find(
             (row: any) =>
@@ -1576,9 +1565,9 @@ export function createAppServer() {
     let rawMaterials = Array.from(mfgRawMaterialsCache.values());
     let batches = Array.from(mfgBatchesCache.values());
 
-    if (serverSupabase && rawMaterials.length === 0) {
+    if (getDb() && rawMaterials.length === 0) {
       try {
-        const { data: rmRows } = await serverSupabase.from('raw_materials').select('*');
+        const { data: rmRows } = await getDb().from('raw_materials').select('*');
         if (Array.isArray(rmRows)) {
           rawMaterials = rmRows.map((r: any) => ({
             id: String(r.id),
@@ -1596,9 +1585,9 @@ export function createAppServer() {
       }
     }
 
-    if (serverSupabase && batches.length === 0) {
+    if (getDb() && batches.length === 0) {
       try {
-        const { data: batchRows } = await serverSupabase.from('inventory_batches').select('*');
+        const { data: batchRows } = await getDb().from('inventory_batches').select('*');
         if (Array.isArray(batchRows)) {
           batches = batchRows.map((b: any) => ({
             id: String(b.id),
@@ -1724,11 +1713,11 @@ export function createAppServer() {
   // ============================================================================
   const loadAuthoritativeOvertimeRequests = async (): Promise<any[]> => {
     let list: any[] = Array.from(overtimeRequestsCache.values());
-    if (serverSupabase) {
+    if (getDb()) {
       try {
         const [{ data: reqRows }, { data: allocRows }] = await Promise.all([
-          serverSupabase.from('overtime_requests').select('*').order('created_at', { ascending: false }),
-          serverSupabase.from('overtime_batch_allocations').select('*').order('created_at', { ascending: true }),
+          getDb().from('overtime_requests').select('*').order('created_at', { ascending: false }),
+          getDb().from('overtime_batch_allocations').select('*').order('created_at', { ascending: true }),
         ]);
         if (Array.isArray(reqRows) && reqRows.length > 0) {
           const allocByReq = new Map<string, any[]>();
@@ -1852,9 +1841,9 @@ export function createAppServer() {
     }
     const id = String(req.params.id || '');
     overtimeRequestsCache.delete(id);
-    if (serverSupabase) {
+    if (getDb()) {
       try {
-        await serverSupabase.from('overtime_requests').delete().eq('id', id);
+        await getDb().from('overtime_requests').delete().eq('id', id);
       } catch {
         // Ignore if unavailable
       }
@@ -1890,9 +1879,9 @@ export function createAppServer() {
       return res.status(caller ? 403 : 401).json({ allowed: false, code: 'OVERTIME_ATTENDANCE_FORBIDDEN', error: auth.reason });
     }
     let attendances: any[] = Array.from(overtimeAttendancesCache.values());
-    if (serverSupabase) {
+    if (getDb()) {
       try {
-        const { data } = await serverSupabase.from('overtime_attendances').select('*').order('date', { ascending: false });
+        const { data } = await getDb().from('overtime_attendances').select('*').order('date', { ascending: false });
         if (Array.isArray(data) && data.length > 0) {
           attendances = data.map((a: any) => ({
             id: String(a.id),
@@ -1999,9 +1988,9 @@ export function createAppServer() {
       return res.status(caller ? 403 : 401).json({ allowed: false, code: 'OVERTIME_POLICIES_FORBIDDEN', error: auth.reason });
     }
     let policies: any[] = Array.from(overtimePoliciesCache.values());
-    if (serverSupabase && policies.length === 0) {
+    if (getDb() && policies.length === 0) {
       try {
-        const { data } = await serverSupabase.from('overtime_policies').select('*').order('created_at', { ascending: true });
+        const { data } = await getDb().from('overtime_policies').select('*').order('created_at', { ascending: true });
         if (Array.isArray(data)) policies = data;
       } catch {
         // Fallback to cache
@@ -2210,6 +2199,121 @@ export function createAppServer() {
     };
     mobileTransactionsStore.crmLeads.unshift(record);
     return res.status(200).json({ ok: true, lead: record });
+  });
+
+  // --------------------------------------------------------------------------
+  // Super Admin Database Status, Schema Verification & Audit Endpoints (Phase 1)
+  // Strictly requires a verified signed session token for an Active Super Admin.
+  // Never exposes Supabase URLs, API keys, service role secrets, or raw URIs.
+  // --------------------------------------------------------------------------
+  const requireSuperAdminSession = async (
+    req: express.Request,
+    res: express.Response
+  ): Promise<any | null> => {
+    const authHeader = String(req.headers['authorization'] || '').trim();
+    const bearerToken = authHeader.toLowerCase().startsWith('bearer ')
+      ? authHeader.slice(7).trim()
+      : '';
+    const sessionToken = String(req.headers['x-erp-session-token'] || bearerToken || '').trim();
+
+    if (!sessionToken || revokedSessionTokens.has(sessionToken)) {
+      res.status(401).json({
+        ok: false,
+        code: 'ADMIN_DB_UNAUTHENTICATED',
+        error: 'Valid signed ERP session token is required.',
+      });
+      return null;
+    }
+
+    const tokenClaims = verifyErpSessionToken(sessionToken);
+    if (!tokenClaims) {
+      res.status(401).json({
+        ok: false,
+        code: 'ADMIN_DB_SESSION_INVALID',
+        error: 'Session token is invalid or expired.',
+      });
+      return null;
+    }
+
+    const storedSession = erpActiveSessions.get(sessionToken);
+    if (storedSession && Date.now() > storedSession.expiresAt) {
+      erpActiveSessions.delete(sessionToken);
+      res.status(401).json({
+        ok: false,
+        code: 'ADMIN_DB_SESSION_EXPIRED',
+        error: 'Session has expired. Please sign in again.',
+      });
+      return null;
+    }
+
+    const caller =
+      (await lookupAuthoritativeUser(tokenClaims.uid, tokenClaims.code, tokenClaims.email)) ||
+      storedSession?.user;
+
+    if (!caller || caller.status === 'Blocked' || caller.status === 'Inactive') {
+      res.status(401).json({
+        ok: false,
+        code: 'ADMIN_DB_ACCOUNT_INACTIVE',
+        error: 'Authenticated account is inactive or blocked.',
+      });
+      return null;
+    }
+
+    if (caller.role !== 'Super Admin') {
+      res.status(403).json({
+        ok: false,
+        code: 'ADMIN_DB_FORBIDDEN',
+        error: 'Forbidden: Super Admin privileges are required to inspect database status or schema.',
+      });
+      return null;
+    }
+
+    return caller;
+  };
+
+  const initialDbSummary = getPublicSafeDatabaseSummary();
+  recordDbAuditEvent({
+    eventType: 'DB_CONFIG_LOADED',
+    actorId: 'system',
+    actorName: 'Server Startup',
+    actorRole: 'System',
+    outcome: initialDbSummary.configured ? 'success' : 'warning',
+    details: initialDbSummary.configured
+      ? `Centralized server DB configuration loaded (authMode=${initialDbSummary.authMode}).`
+      : 'Server started without SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY configured.',
+  });
+
+  app.get('/api/admin/db/status', async (req, res) => {
+    const admin = await requireSuperAdminSession(req, res);
+    if (!admin) return;
+    const status = await checkServerDatabaseStatus({
+      id: admin.id,
+      name: admin.name,
+      role: admin.role,
+    });
+    return res.status(status.configured ? (status.reachable ? 200 : 503) : 200).json(status);
+  });
+
+  app.post('/api/admin/db/verify-schema', async (req, res) => {
+    const admin = await requireSuperAdminSession(req, res);
+    if (!admin) return;
+    const verification = await verifyDatabaseSchema({
+      id: admin.id,
+      name: admin.name,
+      role: admin.role,
+    });
+    return res.status(200).json(verification);
+  });
+
+  app.get('/api/admin/db/audit-logs', async (req, res) => {
+    const admin = await requireSuperAdminSession(req, res);
+    if (!admin) return;
+    const limit = Math.max(1, Math.min(Number(req.query.limit) || 50, 100));
+    return res.status(200).json({
+      ok: true,
+      summary: getPublicSafeDatabaseSummary(),
+      events: getDbAuditEvents(limit),
+    });
   });
 
   return app;
