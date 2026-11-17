@@ -909,7 +909,7 @@ export const PageWisePermissionsEditor: React.FC<PageWisePermissionsEditorProps>
                                   const isViewAction = act.key === 'view';
                                   const isApproval = Boolean(act.isApprovalAction);
                                   const isDestructive = Boolean(act.isDestructive);
-                                  const isFinancial = ['view_raw_material_stock_value', 'view_raw_material_purchase_rate', 'view_batch_stock_value', 'view_revenue'].includes(act.key);
+                                  const isFinancial = ['view_raw_material_stock_value', 'view_raw_material_purchase_rate', 'view_batch_stock_value', 'view_revenue', 'view_cost'].includes(act.key);
 
                                   return (
                                     <label

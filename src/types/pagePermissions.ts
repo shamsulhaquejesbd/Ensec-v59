@@ -887,7 +887,7 @@ export const ERP_PAGE_PERMISSIONS_REGISTRY: ERPModuleCategory[] = [
           { key: 'verify_hr_accounts', label: 'HR / Accounts Verification', description: 'Can audit wage calculation and verify policy rates', isApprovalAction: true },
           { key: 'approve_final', label: 'Final Executive Approval', description: 'Can execute final approval locking OT for payroll and costing', isApprovalAction: true },
           { key: 'allocate_batch', label: 'Allocate to Production Batches', description: 'Can allocate direct overtime hours and costs across manufacturing batches' },
-          { key: 'view_cost', label: 'View Overtime Financials', description: 'Can inspect calculated hourly rates, wage multipliers, and BDT totals' },
+          { key: 'view_cost', label: 'View Overtime Financials', description: 'Can inspect employee monthly salaries, hourly/daily rates, wage multipliers, and BDT totals in OT pages & reports' },
           { key: 'configure_policy', label: 'Configure OT Policies', description: 'Can configure wage bases, standard monthly hours, and overtime multipliers' },
           { key: 'export', label: 'Export Overtime Reports', description: 'Can export monthly overtime and costing reports to Excel' },
           {
